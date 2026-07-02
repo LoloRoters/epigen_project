@@ -13,7 +13,8 @@ In the first part of the analysis, we identify genomic regions whose chromatin a
 2. Create consensus peak set
 3. Count ATAC-seq reads from each BAM file over the consensus peaks
 4. Normalize read counts across samples (TMM) and filter low-count peaks
-5. Perform differential accessibility testing 
+5.Perform differential accessibility testing
+6.Annotate the 20 most significant peaks to nearest genes
 
 ## Setup
 ```{r}
@@ -27,6 +28,8 @@ suppressPackageStartupMessages({
   library(GenomicAlignments)
   library(Rsamtools)
   library(SummarizedExperiment)
+  library(AnnotationHub)
+  library(ensembldb)
 })
 ```
 
@@ -75,7 +78,7 @@ peaks_list <- lapply(peaks, rtracklayer::import)
 
 
 
-# Merge (union) all per-sample peaks into a single consensus peak set, collapsing overlapping intervals into one region
+# Merge all per-sample peaks into a single consensus peak set, collapsing overlapping intervals into one region
 
 merged_peaks <- reduce(unlist(GRangesList(peaks_list)))
 cat("Total consensus peaks:", length(merged_peaks), "\n")
@@ -192,6 +195,55 @@ cat("More open in normoxia:", sum(res$FDR < 0.05 & res$logFC < -1, na.rm=TRUE), 
 ```
 
 
-## Interpretation and Discussion
+## Annotation of 20 the most significant peaks
+To interpret the differential accessibility results biologically, the 20 most significant peaks (ranked by FDR) are annotated to their nearest genes using the GRCm38 (mm10) Ensembl gene annotation retrieved via AnnotationHub. 
 
-The plot shows widespread, fairly symmetric changes in both directions. With FDR < 0.05 and |logFC| > 1, 3,104 peaks open up in hypoxia and 2,506 open up in normoxia — hypoxia tends to open slightly more regions than it closes, but the response is clearly bidirectional rather than a uniform shift in one direction. This matches the broad, two-way chromatin remodeling reported by Dzwigonska et al. (2025) for hypoxic BV2-glioma co-cultures.
+```{r}
+#ah <- AnnotationHub()
+query_results <- query(ah, c("Mus musculus", "EnsDb","GRCm38"))
+query_results
+```
+
+
+
+
+
+```{r}
+# Load GRCm38 (mm10) Ensembl annotation and extract gene coordinates
+ensdb <- ah[["AH89211"]]
+
+
+genes_db <- genes(ensdb)
+
+# Take the 20 most significant peaks (sorted by FDR in res)
+topRegions <- head(row.names(res), 20)
+
+top_gr <- rowRanges(se)[topRegions]
+
+# Find the nearest gene for each peak
+seqlevelsStyle(top_gr) <- "NCBI"
+hits <- nearest(top_gr, genes_db)
+
+valid <- !is.na(hits)
+
+data.frame(
+  peak   = names(top_gr)[valid],
+  symbol = genes_db[hits[valid]]$symbol,
+  logFC  = res[topRegions[valid], "logFC"],
+  FDR    = res[topRegions[valid], "FDR"]
+)
+```
+
+
+
+
+
+
+## Interpretation and Discussion
+## Results
+The differential accessibility analysis identified 3,104 peaks more open in hypoxia and 2,506 peaks more open in normoxia (FDR < 0.05, |logFC| > 1), indicating widespread, bidirectional chromatin remodeling. Among the 20 most significant peaks, annotation to the nearest genes revealed both characterized and predicted loci. The most strongly gained accessibility in hypoxia was observed at Itga1 (logFC = 5.1), encoding integrin alpha-1 involved in cell adhesion and extracellular matrix interaction. Regions more accessible in normoxia included Gm22433, Slc23a2, Cmip, and Haus3, among others. Additional notable hits included Slit1 (logFC = 2.5, more open in hypoxia), Kdm6b (logFC = 3.2, more open in hypoxia), and Map2k4 (logFC = 3.7, more open in hypoxia).
+
+
+## Discussion
+The overall pattern of slightly more peaks opening than closing under hypoxia, but with strong changes in both directions, is broadly consistent with Dzwigonska et al. (2025), who reported 4,418 peaks gained and 3,885 lost in hypoxic BV2-glioma co-cultures. Our counts are somewhat lower, which is expected given differences in peak-calling thresholds and pipeline parameters. Notably, our comparison (CC_Hyp vs CC_N) differs from the paper's key ATAC-seq comparison (CC_Hyp vs Ctrl_Hyp), so direct overlap of specific genes is not expected and indeed not observed. Nevertheless, several genes in our top hits are functionally related to the transcriptional programs described in the paper: Slit1 is associated with axonogenesis, which the paper identifies as a key pathway enriched in CC Hyp Up genes; Map2k4 relates to cell migration and MAPK signaling, consistent with the paper's enrichment of chemotaxis and cell migration terms; and Kdm6b, a histone demethylase known to regulate inflammatory programs in myeloid cells, aligns with the paper's observation that hypoxia broadly affects myeloid differentiation gene expression in microglia. These functional parallels suggest that despite the different comparison axes, both analyses capture aspects of the same underlying hypoxia-driven chromatin reprogramming in glioma-associated microglia.
+
