@@ -1,54 +1,49 @@
 ---
-title: "02_differential accessibility"
-output: html_document
+title: "02 Differential Chromatin Accessibility"
+output: bookdown::html_document2
 date: "2026-06-23"
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/ieee.csl
+link-citations: true
 ---
 
+In the first part of the analysis, we identify genomic regions whose chromatin accessibility differs between BV2 microglial cells co-cultured with glioma cells under hypoxia versus normoxia. Differentially accessible peaks often mark regulatory regions (promoters, enhancers) that are dynamically remodeled in response to hypoxic stress, although accessibility changes alone do not prove that a region is actively driving transcription. They can therefore be used as a starting point for downstream functional enrichment analysis (Part 3), and can be compared with histone modification data to support or refine interpretation of regulatory activity (Part 5).
 
+This analysis will include the following steps:
+1. Define the sample sheet  
+2. Create consensus peak set  
+3. Count ATAC-seq reads from each BAM file over the consensus peaks  
+4. Normalize read counts across samples (TMM) and filter low-count peaks  
+5. Perform differential accessibility testing  
+6. Annotate the 20 most significant peaks to nearest genes  
 
-In the first part of the analysis, we identify genomic regions whose chromatin accessibility differs between BV2 microglial cells co-cultured with glioma cells under hypoxia versus normoxia. Differentially accessible peaks often mark regulatory regions (promoters, enhancers) that are dynamically remodeled in response to hypoxic stress, although accessibility changes alone do not prove that a region is actively driving transcription. They can therefore be used as a starting point for downstream functional and motif enrichment analyses (Parts 3–4), and can be compared with histone modification data to support or refine interpretation of regulatory activity (Part 5).
-
-
-1. Define the sample sheet
-2. Create consensus peak set
-3. Count ATAC-seq reads from each BAM file over the consensus peaks
-4. Normalize read counts across samples (TMM) and filter low-count peaks
-5.Perform differential accessibility testing
-6.Annotate the 20 most significant peaks to nearest genes
-
-## Setup
-```{r}
+## Analysis
+### Setup
+```{r, message=FALSE, warning=FALSE}
 suppressPackageStartupMessages({
   library(GenomicRanges)
   library(SummarizedExperiment)
   library(edgeR) 
   library(epiwraps)
   library(ggplot2)
+  library(ggrepel)
   library(sechm) 
   library(GenomicAlignments)
   library(Rsamtools)
-  library(SummarizedExperiment)
   library(AnnotationHub)
   library(ensembldb)
 })
 ```
 
-
-
-
-## Define the sample sheet
+### Define the sample sheet
 
 Sample metadata were first inspected by loading the SraRunTable_hypoxia_ATAC.csv file, which contains the original SRA run information (accessions, experimental conditions, etc.) downloaded for this dataset. This table was used to verify the correct sample identifiers and conditions before manually constructing the samples data frame used in the downstream analysis.
 
-
-```{r}
-
+```{r, message=FALSE, warning=FALSE}
 ATAC_CSV <- read.csv("data/ATAC/SraRunTable_hypoxia_ATAC.csv")
-ATAC_CSV
-
 ```
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # Manually define the sample sheet: GEO/SRA accessions, matched to experimental condition (hypoxia vs normoxia) and biological replicate
 
 samples <- data.frame(
@@ -60,12 +55,11 @@ samples <- data.frame(
 )
 ```
 
-
-## Create consensus peak set
+### Create consensus peak set
 
 To compare accessibility across samples at the same genomic regions, we first build a single consensus peak set by merging all per-sample peaks into one common set of intervals.
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # Build paths to the per-sample narrowPeak files and import them as GRanges
 
 peaks <- file.path("./data/ATAC_narrowPeak",
@@ -76,90 +70,80 @@ names(peaks) <- samples$srr
 
 peaks_list <- lapply(peaks, rtracklayer::import)
 
-
-
 # Merge all per-sample peaks into a single consensus peak set, collapsing overlapping intervals into one region
 
 merged_peaks <- reduce(unlist(GRangesList(peaks_list)))
 cat("Total consensus peaks:", length(merged_peaks), "\n")
-
 ```
 
-## Count ATAC-seq reads from each BAM file over the consensus peaks
-
+### Count ATAC-seq reads from each BAM file over the consensus peaks
 
 We take the raw aligned reads (BAM files) and count, for each sample, how many reads fall into each consensus peak. This produces a peaks-by-samples count matrix, which is the standard input format required for differential analysis with edgeR.
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 bam_files <- file.path("./data/ATAC", paste0(samples$srr, ".bam"))
 names(bam_files) <- samples$srr
 ```
 
-
-
-```{r}
-
+```{r, message=FALSE, warning=FALSE}
 # Count paired-end ATAC-seq reads from each BAM file overlapping the consensus peak set, producing a peaks-by-samples count matrix stored as a SummarizedExperiment object (se)
 
-bam_list <- BamFileList(bam_files, yieldSize = 2000000)
+if (file.exists("data/peakCounts.rds")) {
+  se <- readRDS("data/peakCounts.rds")
+} else {
+  bam_list <- BamFileList(bam_files, yieldSize = 2000000)
 
-se <- summarizeOverlaps(
-  features = merged_peaks,
-  reads = bam_list,
-  mode = "Union",
-  singleEnd = FALSE,
-  ignore.strand = TRUE
-)
+  se <- summarizeOverlaps(
+    features = merged_peaks,
+    reads = bam_list,
+    mode = "Union",
+    singleEnd = FALSE,
+    ignore.strand = TRUE
+  )
 
-colnames(se) <- samples$srr
+  colnames(se) <- samples$srr
+  colData(se)$condition <- samples$condition
+  colData(se)$rep <- samples$rep
 
-colData(se)$condition <- samples$condition
-colData(se)$rep <- samples$rep
+  saveRDS(se, file = "data/peakCounts.rds")
+}
 ```
 
-```{r}
-saveRDS(se, file = "data/peakCounts.rds")
-```
-
-
-
-# Standard differential analysis with edgeR and TMM normalization
+### Standard differential analysis with edgeR and TMM normalization
 
 The raw read counts cannot be compared directly between samples, since they reflect both true biological signal and technical factors such as sequencing depth. Here we use edgeR's standard workflow to normalize the counts, remove uninformative peaks, and statistically test each peak for a significant accessibility difference between hypoxia and normoxia.
 
-
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # Re-attach metadata explicitly in case colData was lost on reload
 se <- readRDS("data/peakCounts.rds")
+
+peak_ranges <- rowRanges(se)
+peak_ids <- names(peak_ranges)
+if (is.null(peak_ids)) {
+  peak_ids <- paste0(seqnames(peak_ranges), ":", start(peak_ranges), "-", end(peak_ranges))
+}
+names(peak_ranges) <- peak_ids
+rowRanges(se) <- peak_ranges
+rownames(se) <- peak_ids
 
 colData(se)$condition <- c("hypoxia", "hypoxia", "normoxia", "normoxia")
 colData(se)$rep       <- c(1, 2, 1, 2)
 
+# Build an edgeR DGEList from the raw peak counts, grouped by condition
 dds <- edgeR::DGEList(
   counts = assay(se),
   group  = factor(colData(se)$condition, levels = c("normoxia", "hypoxia"))
 )
-# Build an edgeR DGEList from the raw peak counts, grouped by condition
-
-dds <- edgeR::DGEList(
-  counts = assay(se),
-  group  = factor(se$condition, levels = c("normoxia", "hypoxia"))
-)
 
 # TMM normalization accounts for differences in sequencing depth and library composition between samples
-
 dds <- edgeR::calcNormFactors(dds)
 
-
 # Remove low-count peaks that do not carry enough statistical power for reliable differential testing
-
 keep <- edgeR::filterByExpr(dds)
 cat("\nPeaks kept after low-count filter:", sum(keep), "/", nrow(dds), "\n")
 dds <- dds[keep, ]
 
-
 # Estimate dispersion and perform an exact test for the normoxia vs. hypoxia comparison
-
 dds <- edgeR::estimateDisp(dds)
 et  <- exactTest(dds, pair = c("normoxia", "hypoxia"))
 res <- as.data.frame(topTags(et, n = Inf))
@@ -167,58 +151,23 @@ res <- as.data.frame(topTags(et, n = Inf))
 
 We use TMM because, compared to other normalization methods like simple library-size scaling, it automatically identifies and normalizes against the stable, non-differential majority of peaks rather than relying on total read counts alone — avoiding bias from the strongly hypoxia-responsive peaks without requiring us to manually define a reference set.
 
-#results
-
-```{r}
-dir.create("results_da", showWarnings = FALSE, recursive = TRUE)
-saveRDS(list(
-  res = res,   
-  se  = se     
-), file = file.path("results_da", "part1_results.rds"))
-```
-
-```{r, fig.cap="Volcano plot of differential chromatin accessibility between hypoxic and normoxic BV2-glioma co-cultures."}
-head(res)
-
-ggplot(res, aes(logFC, -log10(FDR))) +
-  geom_point() +
-  ggtitle("Differential chromatin accessibility: hypoxia vs. normoxia") +
-  theme(plot.title = element_text(hjust = 0.5))
-```
-The logFC shows the direction and magnitude of the accessibility change — points to the right are more accessible in hypoxia, points to the left are more accessible in normoxia. The -log10 FDR shows statistical significance, so the higher a point sits, the more confident we are that the change is real rather than noise.
-
- 
-`
-```{r}
-cat("More open in hypoxia: ",  sum(res$FDR < 0.05 & res$logFC >  1, na.rm=TRUE), "\n")
-cat("More open in normoxia:", sum(res$FDR < 0.05 & res$logFC < -1, na.rm=TRUE), "\n")
-```
-
-
-## Annotation of 20 the most significant peaks
+### Peak Annotation
 To interpret the differential accessibility results biologically, the 20 most significant peaks (ranked by FDR) are annotated to their nearest genes using the GRCm38 (mm10) Ensembl gene annotation retrieved via AnnotationHub. 
 
-```{r}
-#ah <- AnnotationHub()
+```{r, message=FALSE, warning=FALSE}
+ah <- AnnotationHub()
 query_results <- query(ah, c("Mus musculus", "EnsDb","GRCm38"))
-query_results
 ```
 
-
-
-
-
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # Load GRCm38 (mm10) Ensembl annotation and extract gene coordinates
 ensdb <- ah[["AH89211"]]
-
-
 genes_db <- genes(ensdb)
 
 # Take the 20 most significant peaks (sorted by FDR in res)
 topRegions <- head(row.names(res), 20)
 
-top_gr <- rowRanges(se)[topRegions]
+top_gr <- rowRanges(se)[match(topRegions, names(rowRanges(se)))]
 
 # Find the nearest gene for each peak
 seqlevelsStyle(top_gr) <- "NCBI"
@@ -226,24 +175,66 @@ hits <- nearest(top_gr, genes_db)
 
 valid <- !is.na(hits)
 
-data.frame(
-  peak   = names(top_gr)[valid],
+annotation_top20 <- data.frame(
+  peak = topRegions[valid],
   symbol = genes_db[hits[valid]]$symbol,
-  logFC  = res[topRegions[valid], "logFC"],
-  FDR    = res[topRegions[valid], "FDR"]
-)
+  logFC = res[topRegions[valid], "logFC"],
+  FDR = res[topRegions[valid], "FDR"]
+) 
+
+annotation_top20
 ```
 
+### Results Visualization - Differential Accessibility 
+**Volcano Plot Differential Analysis**
 
+```{r, message=FALSE, warning=FALSE}
+dir.create("results_da", showWarnings = FALSE, recursive = TRUE)
+saveRDS(list(
+  res = res,   
+  se  = se     
+), file = file.path("results_da", "part1_results.rds"))
+```
 
+```{r volcano-plot-DA-part2, fig.cap="Volcano plot of differential chromatin accessibility between hypoxic and normoxic BV2-glioma co-cultures.", message=FALSE, warning=FALSE}
+# color classification column
+res$diffexpressed <- "Not significant"
+res$diffexpressed[res$logFC > 0.6 & res$FDR < 0.05] <- "Enriched in hypoxia"
+res$diffexpressed[res$logFC < -0.6 & res$FDR < 0.05] <- "Repressed in hypoxia"
 
+# map your existing annotation_top20 into the main res dataframe
+res$my_labels <- NA
+res$my_labels[match(annotation_top20$peak, row.names(res))] <- as.character(annotation_top20$symbol)
 
+# 3. volcano plot
+ggplot(data = res, aes(x = logFC, y = -log10(FDR), col = diffexpressed, label = my_labels)) +
+  geom_vline(xintercept = c(-0.6, 0.6), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+  geom_point(size = 2) + 
+  
+  scale_color_manual(values = c("Repressed in hypoxia" = "#00AFBB", 
+                                "Not significant" = "grey", 
+                                "Enriched in hypoxia" = "#bb0000")) + 
+  
+  labs(
+    title = "Differential Chromatin Accessibility: Hypoxia vs. Normoxia",
+    color = "Condition Enrichment"
+  ) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text_repel(max.overlaps = Inf, show.legend = FALSE)
+```
 
-## Interpretation and Discussion
-## Results
-The differential accessibility analysis identified 3,104 peaks more open in hypoxia and 2,506 peaks more open in normoxia (FDR < 0.05, |logFC| > 1), indicating widespread, bidirectional chromatin remodeling. Among the 20 most significant peaks, annotation to the nearest genes revealed both characterized and predicted loci. The most strongly gained accessibility in hypoxia was observed at Itga1 (logFC = 5.1), encoding integrin alpha-1 involved in cell adhesion and extracellular matrix interaction. Regions more accessible in normoxia included Gm22433, Slc23a2, Cmip, and Haus3, among others. Additional notable hits included Slit1 (logFC = 2.5, more open in hypoxia), Kdm6b (logFC = 3.2, more open in hypoxia), and Map2k4 (logFC = 3.7, more open in hypoxia).
+```{r, message=FALSE, warning=FALSE}
+cat("More open in hypoxia: ",  sum(res$FDR < 0.05 & res$logFC >  1, na.rm=TRUE), "\n")
+cat("More open in normoxia:", sum(res$FDR < 0.05 & res$logFC < -1, na.rm=TRUE), "\n")
+```
 
+## Results - Differential Accessibility
+The differential accessibility analysis identified 3134 peaks more open in hypoxia and 2528 peaks more open in normoxia (FDR < 0.05, |logFC| > 1), indicating widespread, bidirectional chromatin remodeling. 
+Among the most significant peaks, annotation to the nearest genes revealed both characterized and predicted loci. The most strongly gained accessibility in hypoxia was observed at Gpr137c (logFC = 5.2), encoding a lysosomal membrane protein involved in mTORC1 signaling. Regions more accessible in normoxia included Prss12 (logFC = -4.5), encoding neurotrypsin, a synaptic serine protease. Additional notable hits included a cluster of genes involved in endosomal/vesicular trafficking (Acap1, Rabepk, Ankfy1) and Tnfrsf23, a decoy TRAIL receptor (see Figure \@ref(fig:volcano-plot-DA-part2)).
 
-## Discussion
-The overall pattern of slightly more peaks opening than closing under hypoxia, but with strong changes in both directions, is broadly consistent with Dzwigonska et al. (2025), who reported 4,418 peaks gained and 3,885 lost in hypoxic BV2-glioma co-cultures. Our counts are somewhat lower, which is expected given differences in peak-calling thresholds and pipeline parameters. Notably, our comparison (CC_Hyp vs CC_N) differs from the paper's key ATAC-seq comparison (CC_Hyp vs Ctrl_Hyp), so direct overlap of specific genes is not expected and indeed not observed. Nevertheless, several genes in our top hits are functionally related to the transcriptional programs described in the paper: Slit1 is associated with axonogenesis, which the paper identifies as a key pathway enriched in CC Hyp Up genes; Map2k4 relates to cell migration and MAPK signaling, consistent with the paper's enrichment of chemotaxis and cell migration terms; and Kdm6b, a histone demethylase known to regulate inflammatory programs in myeloid cells, aligns with the paper's observation that hypoxia broadly affects myeloid differentiation gene expression in microglia. These functional parallels suggest that despite the different comparison axes, both analyses capture aspects of the same underlying hypoxia-driven chromatin reprogramming in glioma-associated microglia.
-
+## Discussion - Differential Accessibility
+The overall pattern of slightly more peaks opening than closing under hypoxia, but with strong changes in both directions, is broadly consistent with Dzwigonska et al., who reported 4,418 peaks gained and 3,885 lost in hypoxic BV2-glioma co-cultures [@dzwigonska_hypoxic_2025]. Our counts are somewhat lower, which is expected given differences in peak-calling thresholds and pipeline parameters. Notably, our comparison (CC_Hyp vs CC_N) differs from the paper's key ATAC-seq comparison (CC_Hyp vs Ctrl_Hyp), so direct overlap of specific genes is not expected and indeed not observed.  
+Among our top hits, the most directly relevant to the specific biology emphasized by Dzwigonska et al. are Gpr137c and Gpd1l, both mechanistically connected to lipid and energy metabolism - the central chromatin-linked phenotype described in the original study (lipid droplet accumulation under hypoxia) [@dzwigonska_hypoxic_2025]. A second notable pattern is a trio of genes converging on endosomal/vesicular trafficking (Acap1, Rabepk, Ankfy1), suggesting a coordinated shift in vesicular handling that plausibly supports the intracellular lipid transport required for this phenotype, even though this specific pathway is not discussed in the original paper. Tnfrsf23, a decoy receptor limiting TRAIL-induced apoptosis, is also of interest given its direct relevance to tumor microenvironment biology and pro-survival signaling.  
+Taken together, these functional parallels - spanning lipid metabolism and the newly identified vesicular trafficking genes, and a pro-survival apoptosis regulator relevant to the tumor microenvironment - suggest that despite the different comparison axes, our analysis captures aspects of the same underlying hypoxia-driven chromatin reprogramming in glioma-associated microglia.
