@@ -1,23 +1,24 @@
 ---
 title: "03 GO Biological Process Enrichment"
-author: "Julia"
+output: bookdown::html_document2
 date: "2026-06-23"
-output: html_document
----
-# Introduction
-
-Following the identification of differentially accessible chromatin regions in the previous analysis (`02_differential_accessibility.Rmd`), we investigated the biological significance of these accessibility changes using Gene Ontology (GO) Biological Process enrichment analysis. More specifically, we addressed the research question:
-
-**Which biological processes are associated with chromatin accessibility changes induced by hypoxia in glioma-associated microglia?**
-
-Differentially accessible regions were separated into peaks that became either **more accessible under hypoxic conditions** or peaks that were **less accessible under hypoxic conditions**. Increased chromatin accessibility is generally associated with increased regulatory potential and may indicate activation of regulatory pathways, whereas reduced accessibility usually shows repression of these processes. Using GREAT, we identified biological processes significantly enriched among genes associated with each set of differentially accessible regions.
-
-This analysis reproduces the functional enrichment component of the original study by linking hypoxia-induced chromatin remodeling to the biological pathways that may contribute to microglial reprogramming within the glioblastoma microenvironment.
-
-**Prerequisites:** This analysis requires the successful completion of `01_downloading_data.Rmd` and `02_differential_accessibility.Rmd`, which generate the differentially accessible peak sets used as input for the enrichment analysis.
-
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/ieee.csl
+link-citations: true
 ---
 
+Following the identification of differentially accessible chromatin regions in the previous analysis (`02_differential_accessibility.Rmd`), we investigated the biological significance of these accessibility changes using Gene Ontology (GO) Biological Process enrichment analysis. More specifically, we addressed the research question: Which biological processes are associated with chromatin accessibility changes induced by hypoxia in glioma-associated microglia?
+
+Differentially accessible regions were separated into peaks that became either more accessible under hypoxic conditions or peaks that were less accessible under hypoxic conditions. Increased chromatin accessibility is generally associated with increased regulatory potential and may indicate activation of regulatory pathways, whereas reduced accessibility usually shows repression of these processes. Using GREAT, we identified biological processes significantly enriched among genes associated with each set of differentially accessible regions.
+
+This analysis will include the following steps:  
+1. Load differential accessibility results from part 02  
+2. Extract genomic coordinates to define the background and isolate regions with increased or decreased accessibility  
+3. Perform GREAT functional enrichment analysis  
+
+## Analysis
+
+### Setup
 ```{r setup, message=FALSE, warning=FALSE}
 suppressPackageStartupMessages({
   library(GenomicRanges)
@@ -25,30 +26,24 @@ suppressPackageStartupMessages({
   library(rtracklayer)
   library(rGREAT)
   library(ggplot2)
+  library(TxDb.Mmusculus.UCSC.mm10.knownGene)
 })
 ```
 
----
+### Load differential accessibility results
 
-# Step 1 — Load results from code 02
-
-```{r load-results}
+```{r load-results, message=FALSE, warning=FALSE}
 saved <- readRDS("results_da/part1_results.rds")
-res <- saved$res    # edgeR topTags data.frame: logFC, FDR, etc.
-se  <- saved$se     # SummarizedExperiment with all tested peaks as rowRanges
+res <- saved$res # edgeR topTags data.frame: logFC, FDR, etc.
+se  <- saved$se # SummarizedExperiment with all tested peaks as rowRanges
 ```
 
----
-
-# Step 2 — Reconstruct peak coordinates
-
-The `se` object from code 02 carries all tested peak coordinates in `rowRanges(se)`.
+### Reconstruct peak coordinates
+The `se` object from part 02 carries all tested peak coordinates in `rowRanges(se)`.
 This is our background (all accessible chromatin tested) for GREAT.
 
-```{r peak-coords}
-
-# res rownames are peak indices from the filtered se — match them back
-bg_regions <- rowRanges(se)[as.integer(rownames(res))]
+```{r peak-coords, message=FALSE, warning=FALSE}
+bg_regions <- rowRanges(se)[match(rownames(res), names(rowRanges(se)))]
 
 cat("Background peaks:", length(bg_regions), "\n")
 cat("Result rows:",      nrow(res),           "\n")
@@ -64,11 +59,9 @@ cat("More open in hypoxia:",  length(hyp_regions),  "peaks\n")
 cat("More open in normoxia:", length(norm_regions), "peaks\n")
 ```
 
----
+### GO enrichment: processes increased in hypoxia
 
-# Step 3 — GO enrichment: processes INCREASED in hypoxia
-
-```{r}
+```{r, message=FALSE, warning=FALSE}
 res_hyp <- great(
   hyp_regions,
   gene_sets  = "GO:BP",
@@ -82,17 +75,17 @@ bp_hyp <- getEnrichmentTables(res_hyp)
 bp_hyp_filt <- bp_hyp[
   bp_hyp$p_adjust < 0.05 &
   bp_hyp$observed_region_hits >= 5 &
-  bp_hyp$fold_enrichment >= 2 &        # <-- must be at least 2x enriched
-  bp_hyp$gene_set_size <= 500,         # <-- removes huge generic GO terms
+  bp_hyp$fold_enrichment >= 2 & # must be at least 2x enriched
+  bp_hyp$gene_set_size <= 500, # removes huge generic GO terms
 ]
 
 bp_hyp_filt <- bp_hyp_filt[order(bp_hyp_filt$p_adjust), ]
 cat("BP terms (increased in hypoxia):", nrow(bp_hyp_filt), "\n")
 ```
 
-# Step 4 — GO enrichment: processes DECREASED in hypoxia
+### GO enrichment: processes decreased in hypoxia
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 res_norm <- great(
   norm_regions,
   gene_sets  = "GO:BP",
@@ -105,17 +98,17 @@ bp_norm <- getEnrichmentTables(res_norm)
 bp_norm_filt <- bp_norm[
   bp_norm$p_adjust < 0.05 &
   bp_norm$observed_region_hits >= 5 &
-  bp_norm$fold_enrichment >= 2 &        # <-- must be at least 2x enriched
-  bp_norm$gene_set_size <= 500,         # <-- removes huge generic GO terms
+  bp_norm$fold_enrichment >= 2 &        # must be at least 2x enriched
+  bp_norm$gene_set_size <= 500,         # removes huge generic GO terms
 ]
 
 bp_norm_filt <- bp_norm_filt[order(bp_norm_filt$p_adjust), ]
 cat("BP terms (decreased in hypoxia):", nrow(bp_norm_filt), "\n")
 ```
 
-# Step 5 — Plot 
+## Visualization Results - GO Biological Process Enrichment
 
-```{r, fig.cap= Processed increased in hypoxia}
+```{r plot-GO-increased, fig.cap= "Gene Ontology Biological Process analysis displaying top 15 terms significantly enriched in genomic regions showing increased accessibility under hypoxia.", message=FALSE, warning=FALSE}
 ggplot(head(bp_hyp_filt, 15),
        aes(fold_enrichment,
            reorder(description, p_adjust),
@@ -123,11 +116,10 @@ ggplot(head(bp_hyp_filt, 15),
            color = -log10(p_adjust))) +
   geom_point() +
   scale_color_viridis_c() +
-  labs(title = "GO BP — increased in hypoxia", x = "Fold enrichment", y = NULL)
+  labs(title = "GO Biological Processes increased in hypoxia", x = "Fold enrichment", y = NULL)
 ```
 
-
-```{r, fig.cap= Processes decreased in hypoxia}
+```{r plot-GO-decreased, fig.cap= "Gene Ontology Biological Process analysis displaying top 15 terms significantly enriched in genomic regions showing decreased accessibility under hypoxia.", message=FALSE, warning=FALSE}
 ggplot(head(bp_norm_filt, 15),
        aes(fold_enrichment,
            reorder(description, p_adjust),
@@ -135,11 +127,10 @@ ggplot(head(bp_norm_filt, 15),
            color = -log10(p_adjust))) +
   geom_point() +
   scale_color_viridis_c() +
-  labs(title = "GO BP — decreased in hypoxia", x = "Fold enrichment", y = NULL)
+  labs(title = "GO Biological Processes decreased in hypoxia", x = "Fold enrichment", y = NULL)
 ```
 
-# Step 6 — Print results
-```{r}
+```{r, message=FALSE, warning=FALSE}
 cat("\n=== PROCESSES INCREASED IN HYPOXIA ===\n")
 print(head(bp_hyp_filt[, c("description", "observed_region_hits",
                              "fold_enrichment", "p_adjust")], 20))
@@ -149,8 +140,9 @@ print(head(bp_norm_filt[, c("description", "observed_region_hits",
                               "fold_enrichment", "p_adjust")], 20))
 ```
 
-#Results:
-Differential chromatin accessibility analysis of BV2 microglia co-cultured with GL261 glioma cells under hypoxia versus normoxia revealed two distinct epigenomic programs. Regions gaining accessibility under hypoxia were enriched for response to decreased oxygen levels, response to oxygen levels, PI3K/protein kinase B signaling, positive regulation of MAPK cascade, T cell differentiation, regulation of hematopoiesis, cell-substrate adhesion, and response to wounding, all with fold enrichments above 2.2 and adjusted p-values below e-28. Regions losing accessibility under hypoxia reflecting processes actively maintained under normoxia showed enrichment for extracellular matrix organization, extracellular structure organization, axonogenesis, glial cell differentiation, skeletal system morphogenesis, and bone development. Together, these results indicate that hypoxia drives BV2 microglia toward an oxygen-sensing, pro-inflammatory signaling state while simultaneously suppressing chromatin accessibility at loci associated with homeostatic glial identity and structural tissue programs.
+## Results - GO Biological Process Enrichment
+Differential chromatin accessibility analysis of microglia co-cultured with glioma cells under hypoxia versus normoxia revealed two distinct epigenomic programs. Regions gaining accessibility under hypoxia were enriched for response to decreased oxygen levels, response to oxygen levels, PI3K/protein kinase B signaling, positive regulation of MAPK cascade, T cell differentiation, regulation of hematopoiesis, cell-substrate adhesion, and response to wounding, all with fold enrichments above 2.2 and adjusted p-values below $10^{-28}$ (see Figure \@ref(fig:plot-GO-increased)). Regions losing accessibility under hypoxia reflecting processes actively maintained under normoxia showed enrichment for extracellular matrix organization, extracellular structure organization, axonogenesis, glial cell differentiation, skeletal system morphogenesis, and bone development (see Figure \@ref(fig:plot-GO-decreased)).  
+Together, these results indicate that hypoxia drives BV2 microglia toward an oxygen-sensing, pro-inflammatory signaling state while simultaneously suppressing chromatin accessibility at loci associated with homeostatic glial identity and structural tissue programs.
 
-#Discussion:
-Our chromatin accessibility findings partially reproduce and extend those reported by Dzwigonska et al. The paper's RNA-seq GO enrichment identified response to hypoxia, response to oxygen levels, chemotaxis, cell migration, angiogenesis, and blood vessel morphogenesis as the top upregulated processes in hypoxic glioma co-cultured BV2 cells, while ribosome biogenesis, RNA processing, and DNA replication were downregulated. Our ATAC-seq-based enrichment recovers response to oxygen levels and response to decreased oxygen levels in the hypoxia-gained peaks, directly corroborating the paper's transcriptomic findings at the epigenomic level and suggesting these programs are regulated upstream through chromatin remodeling rather than solely through immediate HIF transcription factor activity. We additionally identify PI3K/PKB and MAPK cascade signaling and T cell differentiation and hematopoiesis regulation as hypoxia-gained chromatin programs, which the paper does not highlight in its ATAC-seq GO analysis. On the normoxia side, our finding that glial cell differentiation and extracellular matrix organization accessibility is lost under hypoxia aligns closely with the paper's central claim that hypoxia suppresses homeostatic microglial identity genes such as P2ry12 and Tmem119 through chromatin remodeling, and with their observation that hypoxia reduces accessibility at the P2ry12 promoter containing IRF8 and SPI1 binding sites. 
+## Discussion - GO Biological Process Enrichment
+Our chromatin accessibility findings partially reproduce and extend those reported by Dzwigonska et al. The paper's RNA-seq GO enrichment identified response to hypoxia, response to oxygen levels, chemotaxis, cell migration, angiogenesis, and blood vessel morphogenesis as the top upregulated processes in hypoxic glioma co-cultured BV2 cells, while ribosome biogenesis, RNA processing, and DNA replication were downregulated [@dzwigonska_hypoxic_2025]. Our ATAC-seq-based enrichment recovers response to oxygen levels and response to decreased oxygen levels in the hypoxia-gained peaks, directly corroborating the paper's transcriptomic findings at the epigenomic level and suggesting these programs are regulated upstream through chromatin remodeling rather than solely through immediate HIF transcription factor activity. We additionally identify PI3K/PKB and MAPK cascade signaling and T cell differentiation and hematopoiesis regulation as hypoxia-gained chromatin programs, which the paper does not highlight in its ATAC-seq GO analysis. On the normoxia side, our finding that glial cell differentiation and extracellular matrix organization accessibility is lost under hypoxia aligns closely with the paper's central claim that hypoxia suppresses homeostatic microglial identity genes such as P2ry12 and Tmem119 through chromatin remodeling, and with their observation that hypoxia reduces accessibility at the P2ry12 promoter containing IRF8 and SPI1 binding sites [@dzwigonska_hypoxic_2025]. 
