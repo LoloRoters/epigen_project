@@ -1,6 +1,5 @@
 ---
 title: "04 Motif Enrichment Analysis"
-author: "Yara"
 output: bookdown::html_document2
 date: "2026-06-24"
 bibliography: references.bib
@@ -10,6 +9,7 @@ link-citations: true
 
 In the next step, motif enrichment analysis will be performed to identify DNA motifs that are differentially accessible between hypoxic and normoxic conditions. Enriched motifs often reflect underlying transcription factor activity, although they do not prove direct transcription factor binding. They can therefore be used as a proxy for regulatory mechanisms shaping the condition-specific response.
 
+This analysis will include the following steps:  
 1. Annotate peaks with GC bias  
 2. Get a list of motifs  
 3. Scan the ATAC seq peaks for motif matches  
@@ -35,7 +35,7 @@ suppressPackageStartupMessages({
 })
 ```
 
-```{r, include=FALSE}
+```{r, include=FALSE, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(
   fig.width = 8,
   fig.height = 5,
@@ -44,7 +44,7 @@ knitr::opts_chunk$set(
 )
 ```
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 theme_set(
   theme_classic() +
   theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5)) #hjust = 0 to left align
@@ -53,21 +53,21 @@ theme_set(
 
 ### Loading the count matrix
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 se <- readRDS("data/peakCounts.rds")
 colData(se)
 ```
 
 In order for the `betterChromVAR` function to work, we need to remove peaks that have a zero value in every sample, because they contain no signal and can cause the background covariance calculation to fail.
 
-```{r remove-zero}
+```{r remove-zero, message=FALSE, warning=FALSE}
 non_zero <- Matrix::rowSums(SummarizedExperiment::assay(se)) > 0
 se <- se[non_zero, ]
 ```
 
 ### Annotate regions
 
-```{r annotation}
+```{r annotation, message=FALSE, warning=FALSE}
 se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
 seqlevelsStyle(se) <- "UCSC"
 se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
@@ -77,20 +77,20 @@ se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
 
 To perform the motif annotations, we need a motif list. I will use the motif list from the `MotifDb`package.
 
-```{r motif-list}
+```{r motif-list, message=FALSE, warning=FALSE}
 motifs <- MotifDb::query(MotifDb, "HOCOMOCOv13")
 ```
 
 Then we convert the motifs that they get accepted from `motifmatchr`.
 
-```{r, message=FALSE}
+```{r, message=FALSE, warning=FALSE}
 motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
 names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+","",x@name)))
 ```
 
 And now we will scan the ATAC peaks for motif matches.
 
-```{r motif-matches, cache = TRUE}
+```{r motif-matches, message=FALSE, warning=FALSE}
 matches <- motifmatchr::matchMotifs(motifs, se, genome=BSgenome.Mmusculus.UCSC.mm10)
 matches
 ```
@@ -99,7 +99,7 @@ matches
 
 Now we will get the motif deviations, showing the realtive accessibility of each motif in each sample.
 
-```{r motif-deviations}
+```{r motif-deviations, message=FALSE, warning=FALSE}
 dev <- betterChromVAR(se, matches)
 dev
 ```
@@ -110,12 +110,12 @@ The output is also a SummarizedExperiment, this time with samples as columns and
 
 We can use these motif deviations to perform differential analysis.
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # use normoxia as reference level
 dev$condition <- factor(dev$condition, levels = c("normoxia", "hypoxia"))
 ```
 
-```{r DA}
+```{r DA, message=FALSE, warning=FALSE}
 design <- model.matrix(~condition, data=as.data.frame(colData(dev)))
 
 fit <- eBayes(lmFit(assay(dev, "z"), design))
@@ -124,12 +124,13 @@ res$motif <- row.names(res)
 ```
 
 
-### Volcano Plot Differential Analysis
+### Results Visualization
+#### Volcano Plot Differential Analysis
 
 The volcano plot displays the differential motif accessibility between hypoxia and normoxia conditions, with annotations highlighting the top 10 most significantly enriched and repressed motifs.
 Additionally, HIF transcription factor family motifs are annotated, as these master regulators of the hypoxic response are expected to be enriched and more accessible in hypoxic conditions.
 
-```{r volcano-plot-DA, fig.cap="Volcano plot showing differential motif accessibility between hypoxia and normoxia conditions. Annotated points show the top 10 most significantly enriched and depleted motifs, as well as motifs belonging to the HIF transcription factor family."}
+```{r volcano-plot-DA, fig.cap="Volcano plot showing differential motif accessibility between hypoxia and normoxia conditions. Annotated points show the top 10 most significantly enriched and depleted motifs, as well as motifs belonging to the HIF transcription factor family.", message=FALSE, warning=FALSE}
 
 # color classification column
 res$diffexpressed <- "Not significant"
@@ -173,10 +174,10 @@ ggplot(data = res, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed, la
   geom_text_repel(max.overlaps = Inf, show.legend = FALSE)
 ```
 
-### Heatmaps Differential Analysis
+#### Heatmaps Differential Analysis
 To additionally look at the accessibility profiles across the individual replicates, we can look at the motifs of interest with a heatmap.
 
-```{r heatmap-repressed, fig.cap="Heatmap showing accessibility profiles across individual replicates for the most repressed motifs in hypoxia."}
+```{r heatmap-repressed, fig.cap="Heatmap showing accessibility profiles across individual replicates for the most repressed motifs in hypoxia.", message=FALSE, warning=FALSE}
 col_rdbu <- hcl.colors(29, palette = "RdBu", rev = TRUE)
 
 col_conditions <- list(
@@ -196,7 +197,7 @@ sechm(dev, most_repressed_motifs,
     )
 ```
 
-```{r heatmap-enriched, fig.cap="Heatmap showing accessibility profiles across individual replicates for the top enriched motifs in hypoxia."}
+```{r heatmap-enriched, fig.cap="Heatmap showing accessibility profiles across individual replicates for the top enriched motifs in hypoxia.", message=FALSE, warning=FALSE}
 col_rdbu <- hcl.colors(29, palette = "RdBu", rev = TRUE)
 
 col_conditions <- list(
@@ -217,7 +218,7 @@ sechm(dev, most_enriched_motifs,
     )
 ```
 
-```{r heatmap-hif-motifs, fig.cap="Heatmap showing accessibility profiles across individual replicates for selected HIF family motifs."}
+```{r heatmap-hif-motifs, fig.cap="Heatmap showing accessibility profiles across individual replicates for selected HIF family motifs.", message=FALSE, warning=FALSE}
 hif_motifs <- grep("HIF1A|EPAS1|HIF2A|HIF3A|ARNT2?|ARNT|HIF", rownames(dev), value = TRUE, ignore.case = TRUE)
 
 sechm(dev, hif_motifs,
@@ -230,7 +231,7 @@ sechm(dev, hif_motifs,
       )
 ```
 
-## Motif Enrichment Analysis - Results
+## Results - Motif Enrichment Analysis
 Motif enrichment analysis revealed distinct motifs that were differentially accessible between myeloid cells cultured under normoxic and hypoxic conditions.
 
 The motifs most strongly repressed upon hypoxia exposure belong to the ETS transcription factor family, including ELF5, ELF4, ELF2.1, and ETV4 (see Figure \@ref(fig:volcano-plot-DA)).
@@ -246,7 +247,7 @@ Most HIF-family motifs show a consistent profile across the hypoxic replicates. 
 A notable exception is ARNT2. It shows completely opposite trends between the two hypoxic replicates, with a decrease in accessibility in one sample and a sharp increase in the other, suggesting a potential batch effect (see Figure \@ref(fig:heatmap-hif-motifs)).
 
 
-## Motif Enrichment Analysis - Discussion
+## Discussion - Motif Enrichment Analysis
 Our analysis identified ETS transcription factor motifs to be strongly repressed upon hypoxic exposure in glioma associated myeloid cells. 
 The ETS transcription factor family comprises functional master regulators of myeloid cell identity and differentiation [@sharrocks_ets-domain_2001]. The observed downregulation of ETS family motif accessibility under hypoxic conditions indicates that the glioma-associated myeloid cells transition away from a homeostatic state, potentially altering their immunosuppressive phenotype. 
 
@@ -262,4 +263,4 @@ Hypoxia-inducible factors (HIFs) serve as the master transcriptional regulators 
 This result stands in contrast to the primary paper, which reported a statistically significant enrichment of the classic HIF-1α/2α motifs following hypoxic exposure [@dzwigonska_hypoxic_2025].
 However, the primary paper explicitly noted that this motif enrichment was completely absent from promoter-only regions and could only be detected when the analysis was expanded to include broader genic regions encompassing both the promoters and gene bodies. A global analysis of core HIF motifs, as performed here, may therefore dilute this statistical signal due to high baseline variation in normoxic replicates and localized chromatin dynamics.
 
-## Reference
+## References
