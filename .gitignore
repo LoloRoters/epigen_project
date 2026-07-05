@@ -4,6 +4,7 @@
 
 ## Data folder
 data/
+results_da/
 
 ## Generated output
 *.pdf
