@@ -19,45 +19,874 @@ Therefore, the primary paper aimed to unvocer how hypoxia remodels chromatin acc
 We worked with data from microglia-glioma co-cultures that were exposed to a hypoxic environment and compared them to ones cultured under normoxia.
 To capture global epigenetic changes, the authors performed two high-throughput sequencing methods. First, they used ATAC-seq to profile changes in chromatin accessibility, and secondly, they performed CUT&RUN sequencing to map the H3K27ac histone modification, which marks active promoter and enhancer regions.  
 
-Our computational analysis was structured into four major components to comprehensively evaluate the epigenomic effects of hypoxia:  
+Our computational analysis was structured into four five components to comprehensively evaluate the epigenomic effects of hypoxia:  
+1.**Data downloading** of ATAC-seq and CUT&RUN data.
 
-1. **Differential accessibility analysis** was performed to identify regions of chromatin that underwent significant structural changes upon hypoxic exposure.
+2. **Differential accessibility analysis** was performed to identify regions of chromatin that underwent significant structural changes upon hypoxic exposure.
 
-2. **Functional enrichment analysis** was performed on these differentially accessible regions to uncover the overrepresented biological processes affected by hypoxia.
+3. **Functional enrichment analysis** was performed on these differentially accessible regions to uncover the overrepresented biological processes affected by hypoxia.
 
-3. **Motif enrichment analysis** was performed to determine which transcription factor binding sites might be affected by hypoxia
+4. **Motif enrichment analysis** was performed to determine which transcription factor binding sites might be affected by hypoxia
 
-4. **Integration of CUT&RUN data** was used to evaluate how closely active H3K27ac histone modification signals aligned with the observed changes in chromatin accessibility.
+5. **Integration of CUT&RUN data** was used to evaluate how closely active H3K27ac histone modification signals aligned with the observed changes in chromatin accessibility.
 
 # Analysis
-## Setup
-First we will create a global plotting style.
+
+## General Setup
+```{r, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(bookdown)
+  
+  library(GenomicRanges)
+  library(SummarizedExperiment)
+  library(edgeR) 
+  library(epiwraps)
+  library(ggplot2)
+  library(ggrepel)
+  library(sechm) 
+  library(GenomicAlignments)
+  library(Rsamtools)
+  library(AnnotationHub)
+  library(ensembldb)
+  
+  library(rtracklayer)
+  library(rGREAT)
+  library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+  
+  library(motifmatchr)
+  library(MotifDb)
+  library(universalmotif)
+  library(GenomeInfoDb)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(limma)
+  library(betterChromVAR)
+  library(EnrichedHeatmap)
+  library(GenomeInfoDb)
+  library(ChIPseeker)
+})
+```
 
 ```{r setup-plot, include=FALSE}
-# knitr::opts_chunk$set(
-#   fig.width = 8,
-#   fig.height = 5,
-#   fig.align = "center",
-#   out.width = "90%"
-# )
+knitr::opts_chunk$set(
+  fig.width = 8,
+  fig.height = 5,
+  fig.align = "center",
+  out.width = "90%"
+)
 ```
 
 ```{r}
-# theme_set(
-#   theme_classic() +
-#   theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) #hjust = 0 to left align
-#   )
+theme_set(
+  theme_classic() +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) #hjust = 0 to left align
+)
 ```
 
+## Data Downloading
+This code can be run to download the data into the directory `data`. This data will not be tracked, thus everyone of the group needs to run this code on it's own device.
 
-## Downloading
+```{r create-dir, message=FALSE, warning=FALSE}
+dir.create("data")
+```
 
-## Differential Gene Accessibility
+```{r downlaod-bamfiles, message=FALSE, warning=FALSE}
+options(timeout = 3600)
+
+download.file("https://polybox.ethz.ch/index.php/s/H9sDxbT7qTHsyLg/download", destfile = "data/data.tar", mode = "wb")
+untar("data/data.tar", exdir = "data")
+file.remove("data/data.tar")
+```
+
+We will also download the narrowpeak files from the NCBI GEO repository (GSE300330).
+
+```{r download-narrowpeak, message=FALSE, warning=FALSE}
+dir.create("data/ATAC_narrowPeak")
+
+download.file("https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE300330&format=file", destfile = "data/ATAC_narrowPeak/GSE300330_RAW.tar", mode = "wb")
+untar("data/ATAC_narrowPeak/GSE300330_RAW.tar", exdir = "data/ATAC_narrowPeak")
+file.remove("data/ATAC_narrowPeak/GSE300330_RAW.tar")
+```
+
+## Differential Chromatin Accessibility
+
+In the first part of the analysis, we identify genomic regions whose chromatin accessibility differs between BV2 microglial cells co-cultured with glioma cells under hypoxia versus normoxia. Differentially accessible peaks often mark regulatory regions (promoters, enhancers) that are dynamically remodeled in response to hypoxic stress, although accessibility changes alone do not prove that a region is actively driving transcription. They can therefore be used as a starting point for downstream functional enrichment analysis (Part 3), and can be compared with histone modification data to support or refine interpretation of regulatory activity (Part 5).
+
+This analysis will include the following steps:
+1. Define the sample sheet  
+2. Create consensus peak set  
+3. Count ATAC-seq reads from each BAM file over the consensus peaks  
+4. Normalize read counts across samples (TMM) and filter low-count peaks  
+5. Perform differential accessibility testing  
+6. Annotate the 20 most significant peaks to nearest genes  
+
+
+### Analysis - Differential Chromatin Accessibility
+
+#### Define the sample sheet
+
+Sample metadata were first inspected by loading the SraRunTable_hypoxia_ATAC.csv file, which contains the original SRA run information (accessions, experimental conditions, etc.) downloaded for this dataset. This table was used to verify the correct sample identifiers and conditions before manually constructing the samples data frame used in the downstream analysis.
+
+```{r, message=FALSE, warning=FALSE}
+ATAC_CSV <- read.csv("data/ATAC/SraRunTable_hypoxia_ATAC.csv")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Manually define the sample sheet: GEO/SRA accessions, matched to experimental condition (hypoxia vs normoxia) and biological replicate
+
+samples <- data.frame(
+  gsm       = c("GSM8574835","GSM8574836","GSM8574833","GSM8574834"),
+  srr       = c("SRR31003493","SRR31003492","SRR31003495","SRR31003494"),
+  condition = c("hypoxia","hypoxia","normoxia","normoxia"),
+  rep       = c(1, 2, 1, 2),
+  stringsAsFactors = FALSE
+)
+```
+
+#### Create consensus peak set
+
+To compare accessibility across samples at the same genomic regions, we first build a single consensus peak set by merging all per-sample peaks into one common set of intervals.
+
+```{r, message=FALSE, warning=FALSE}
+# Build paths to the per-sample narrowPeak files and import them as GRanges
+
+peaks <- file.path("./data/ATAC_narrowPeak",
+  paste0(samples$gsm, "_BV2_cc_",
+         ifelse(samples$condition == "hypoxia", "H", "N"),
+         "_n", samples$rep, ".narrowPeak.gz"))
+names(peaks) <- samples$srr
+
+peaks_list <- lapply(peaks, rtracklayer::import)
+
+# Merge all per-sample peaks into a single consensus peak set, collapsing overlapping intervals into one region
+
+merged_peaks <- reduce(unlist(GRangesList(peaks_list)))
+cat("Total consensus peaks:", length(merged_peaks), "\n")
+```
+
+#### Count ATAC-seq reads from each BAM file over the consensus peaks
+
+We take the raw aligned reads (BAM files) and count, for each sample, how many reads fall into each consensus peak. This produces a peaks-by-samples count matrix, which is the standard input format required for differential analysis with edgeR.
+
+```{r, message=FALSE, warning=FALSE}
+bam_files <- file.path("./data/ATAC", paste0(samples$srr, ".bam"))
+names(bam_files) <- samples$srr
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Count paired-end ATAC-seq reads from each BAM file overlapping the consensus peak set, producing a peaks-by-samples count matrix stored as a SummarizedExperiment object (se)
+
+if (file.exists("data/peakCounts.rds")) {
+  se <- readRDS("data/peakCounts.rds")
+} else {
+  bam_list <- BamFileList(bam_files, yieldSize = 2000000)
+
+  se <- summarizeOverlaps(
+    features = merged_peaks,
+    reads = bam_list,
+    mode = "Union",
+    singleEnd = FALSE,
+    ignore.strand = TRUE
+  )
+
+  colnames(se) <- samples$srr
+  colData(se)$condition <- samples$condition
+  colData(se)$rep <- samples$rep
+
+  saveRDS(se, file = "data/peakCounts.rds")
+}
+```
+
+#### Standard differential analysis with edgeR and TMM normalization
+
+The raw read counts cannot be compared directly between samples, since they reflect both true biological signal and technical factors such as sequencing depth. Here we use edgeR's standard workflow to normalize the counts, remove uninformative peaks, and statistically test each peak for a significant accessibility difference between hypoxia and normoxia.
+
+```{r, message=FALSE, warning=FALSE}
+# Re-attach metadata explicitly in case colData was lost on reload
+se <- readRDS("data/peakCounts.rds")
+
+peak_ranges <- rowRanges(se)
+peak_ids <- names(peak_ranges)
+if (is.null(peak_ids)) {
+  peak_ids <- paste0(seqnames(peak_ranges), ":", start(peak_ranges), "-", end(peak_ranges))
+}
+names(peak_ranges) <- peak_ids
+rowRanges(se) <- peak_ranges
+rownames(se) <- peak_ids
+
+colData(se)$condition <- c("hypoxia", "hypoxia", "normoxia", "normoxia")
+colData(se)$rep       <- c(1, 2, 1, 2)
+
+# Build an edgeR DGEList from the raw peak counts, grouped by condition
+dds <- edgeR::DGEList(
+  counts = assay(se),
+  group  = factor(colData(se)$condition, levels = c("normoxia", "hypoxia"))
+)
+
+# TMM normalization accounts for differences in sequencing depth and library composition between samples
+dds <- edgeR::calcNormFactors(dds)
+
+# Remove low-count peaks that do not carry enough statistical power for reliable differential testing
+keep <- edgeR::filterByExpr(dds)
+cat("\nPeaks kept after low-count filter:", sum(keep), "/", nrow(dds), "\n")
+dds <- dds[keep, ]
+
+# Estimate dispersion and perform an exact test for the normoxia vs. hypoxia comparison
+dds <- edgeR::estimateDisp(dds)
+et  <- exactTest(dds, pair = c("normoxia", "hypoxia"))
+res <- as.data.frame(topTags(et, n = Inf))
+```
+
+We use TMM because, compared to other normalization methods like simple library-size scaling, it automatically identifies and normalizes against the stable, non-differential majority of peaks rather than relying on total read counts alone — avoiding bias from the strongly hypoxia-responsive peaks without requiring us to manually define a reference set.
+
+#### Peak Annotation
+To interpret the differential accessibility results biologically, the 20 most significant peaks (ranked by FDR) are annotated to their nearest genes using the GRCm38 (mm10) Ensembl gene annotation retrieved via AnnotationHub. 
+
+```{r, message=FALSE, warning=FALSE}
+ah <- AnnotationHub()
+query_results <- query(ah, c("Mus musculus", "EnsDb","GRCm38"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Load GRCm38 (mm10) Ensembl annotation and extract gene coordinates
+ensdb <- ah[["AH89211"]]
+genes_db <- genes(ensdb)
+
+# Take the 20 most significant peaks (sorted by FDR in res)
+topRegions <- head(row.names(res), 20)
+
+top_gr <- rowRanges(se)[match(topRegions, names(rowRanges(se)))]
+
+# Find the nearest gene for each peak
+seqlevelsStyle(top_gr) <- "NCBI"
+hits <- nearest(top_gr, genes_db)
+
+valid <- !is.na(hits)
+
+annotation_top20 <- data.frame(
+  peak = topRegions[valid],
+  symbol = genes_db[hits[valid]]$symbol,
+  logFC = res[topRegions[valid], "logFC"],
+  FDR = res[topRegions[valid], "FDR"]
+) 
+
+annotation_top20
+```
+
+### Results Visualization - Differential Accessibility
+
+#### Volcano Plot Differential Analysis
+
+```{r, message=FALSE, warning=FALSE}
+dir.create("results_da", showWarnings = FALSE, recursive = TRUE)
+saveRDS(list(
+  res = res,   
+  se  = se     
+), file = file.path("results_da", "part1_results.rds"))
+```
+
+```{r volcano-plot-DA-part2, fig.cap="Volcano plot of differential chromatin accessibility between hypoxic and normoxic BV2-glioma co-cultures.", message=FALSE, warning=FALSE}
+# color classification column
+res$diffexpressed <- "Not significant"
+res$diffexpressed[res$logFC > 0.6 & res$FDR < 0.05] <- "Enriched in hypoxia"
+res$diffexpressed[res$logFC < -0.6 & res$FDR < 0.05] <- "Repressed in hypoxia"
+
+# map your existing annotation_top20 into the main res dataframe
+res$my_labels <- NA
+res$my_labels[match(annotation_top20$peak, row.names(res))] <- as.character(annotation_top20$symbol)
+
+# 3. volcano plot
+ggplot(data = res, aes(x = logFC, y = -log10(FDR), col = diffexpressed, label = my_labels)) +
+  geom_vline(xintercept = c(-0.6, 0.6), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+  geom_point(size = 2) + 
+  
+  scale_color_manual(values = c("Repressed in hypoxia" = "#00AFBB", 
+                                "Not significant" = "grey", 
+                                "Enriched in hypoxia" = "#bb0000")) + 
+  
+  labs(
+    title = "Differential Chromatin Accessibility: Hypoxia vs. Normoxia",
+    color = "Condition Enrichment"
+  ) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text_repel(max.overlaps = Inf, show.legend = FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+cat("More open in hypoxia: ",  sum(res$FDR < 0.05 & res$logFC >  1, na.rm=TRUE), "\n")
+cat("More open in normoxia:", sum(res$FDR < 0.05 & res$logFC < -1, na.rm=TRUE), "\n")
+```
+
+### Results - Differential Accessibility
+The differential accessibility analysis identified 3134 peaks more open in hypoxia and 2528 peaks more open in normoxia (FDR < 0.05, |logFC| > 1), indicating widespread, bidirectional chromatin remodeling. 
+Among the most significant peaks, annotation to the nearest genes revealed both characterized and predicted loci. The most strongly gained accessibility in hypoxia was observed at Gpr137c (logFC = 5.2), encoding a lysosomal membrane protein involved in mTORC1 signaling. Regions more accessible in normoxia included Prss12 (logFC = -4.5), encoding neurotrypsin, a synaptic serine protease. Additional notable hits included a cluster of genes involved in endosomal/vesicular trafficking (Acap1, Rabepk, Ankfy1) and Tnfrsf23, a decoy TRAIL receptor (see Figure \@ref(fig:volcano-plot-DA-part2)).
+
+### Discussion - Differential Accessibility
+The overall pattern of slightly more peaks opening than closing under hypoxia, but with strong changes in both directions, is broadly consistent with Dzwigonska et al., who reported 4,418 peaks gained and 3,885 lost in hypoxic BV2-glioma co-cultures [@dzwigonska_hypoxic_2025]. Our counts are somewhat lower, which is expected given differences in peak-calling thresholds and pipeline parameters. Notably, our comparison (CC_Hyp vs CC_N) differs from the paper's key ATAC-seq comparison (CC_Hyp vs Ctrl_Hyp), so direct overlap of specific genes is not expected and indeed not observed.  
+Among our top hits, the most directly relevant to the specific biology emphasized by Dzwigonska et al. are Gpr137c and Gpd1l, both mechanistically connected to lipid and energy metabolism - the central chromatin-linked phenotype described in the original study (lipid droplet accumulation under hypoxia) [@dzwigonska_hypoxic_2025]. A second notable pattern is a trio of genes converging on endosomal/vesicular trafficking (Acap1, Rabepk, Ankfy1), suggesting a coordinated shift in vesicular handling that plausibly supports the intracellular lipid transport required for this phenotype, even though this specific pathway is not discussed in the original paper. Tnfrsf23, a decoy receptor limiting TRAIL-induced apoptosis, is also of interest given its direct relevance to tumor microenvironment biology and pro-survival signaling.  
+Taken together, these functional parallels - spanning lipid metabolism and the newly identified vesicular trafficking genes, and a pro-survival apoptosis regulator relevant to the tumor microenvironment - suggest that despite the different comparison axes, our analysis captures aspects of the same underlying hypoxia-driven chromatin reprogramming in glioma-associated microglia.
+
 
 ## Functional Enrichment Analysis
 
+Following the identification of differentially accessible chromatin regions in the previous analysis (`02_differential_accessibility.Rmd`), we investigated the biological significance of these accessibility changes using Gene Ontology (GO) Biological Process enrichment analysis. More specifically, we addressed the research question: Which biological processes are associated with chromatin accessibility changes induced by hypoxia in glioma-associated microglia?
+
+Differentially accessible regions were separated into peaks that became either more accessible under hypoxic conditions or peaks that were less accessible under hypoxic conditions. Increased chromatin accessibility is generally associated with increased regulatory potential and may indicate activation of regulatory pathways, whereas reduced accessibility usually shows repression of these processes. Using GREAT, we identified biological processes significantly enriched among genes associated with each set of differentially accessible regions.
+
+This analysis will include the following steps:  
+1. Load differential accessibility results from part 02  
+2. Extract genomic coordinates to define the background and isolate regions with increased or decreased accessibility  
+3. Perform GREAT functional enrichment analysis  
+
+### Analysis - Functional Enrichment Analysis
+
+#### Load differential accessibility results
+
+```{r load-results, message=FALSE, warning=FALSE}
+saved <- readRDS("results_da/part1_results.rds")
+res <- saved$res # edgeR topTags data.frame: logFC, FDR, etc.
+se  <- saved$se # SummarizedExperiment with all tested peaks as rowRanges
+```
+
+#### Reconstruct peak coordinates
+The `se` object from part 02 carries all tested peak coordinates in `rowRanges(se)`.
+This is our background (all accessible chromatin tested) for GREAT.
+
+```{r peak-coords, message=FALSE, warning=FALSE}
+bg_regions <- rowRanges(se)[match(rownames(res), names(rowRanges(se)))]
+
+cat("Background peaks:", length(bg_regions), "\n")
+cat("Result rows:",      nrow(res),           "\n")
+stopifnot(nrow(res) == length(bg_regions))  # should now pass
+
+hyp_idx  <- which(!is.na(res$FDR) & res$FDR < 0.05 & res$logFC >  1)
+norm_idx <- which(!is.na(res$FDR) & res$FDR < 0.05 & res$logFC < -1)
+
+hyp_regions  <- bg_regions[hyp_idx]
+norm_regions <- bg_regions[norm_idx]
+
+cat("More open in hypoxia:",  length(hyp_regions),  "peaks\n")
+cat("More open in normoxia:", length(norm_regions), "peaks\n")
+```
+
+#### GO enrichment: processes increased in hypoxia
+
+```{r, message=FALSE, warning=FALSE}
+res_hyp <- great(
+  hyp_regions,
+  gene_sets  = "GO:BP",
+  tss_source = "mm10",
+  background = bg_regions,
+  cores      = 2
+)
+bp_hyp <- getEnrichmentTables(res_hyp)
+
+# Filter out generic terms — keep only specific ones
+bp_hyp_filt <- bp_hyp[
+  bp_hyp$p_adjust < 0.05 &
+  bp_hyp$observed_region_hits >= 5 &
+  bp_hyp$fold_enrichment >= 2 & # must be at least 2x enriched
+  bp_hyp$gene_set_size <= 500, # removes huge generic GO terms
+]
+
+bp_hyp_filt <- bp_hyp_filt[order(bp_hyp_filt$p_adjust), ]
+cat("BP terms (increased in hypoxia):", nrow(bp_hyp_filt), "\n")
+```
+
+#### GO enrichment: processes decreased in hypoxia
+
+```{r, message=FALSE, warning=FALSE}
+res_norm <- great(
+  norm_regions,
+  gene_sets  = "GO:BP",
+  tss_source = "mm10",
+  background = bg_regions,
+  cores      = 2
+)
+bp_norm <- getEnrichmentTables(res_norm)
+# Filter out generic terms — keep only specific ones
+bp_norm_filt <- bp_norm[
+  bp_norm$p_adjust < 0.05 &
+  bp_norm$observed_region_hits >= 5 &
+  bp_norm$fold_enrichment >= 2 &        # must be at least 2x enriched
+  bp_norm$gene_set_size <= 500,         # removes huge generic GO terms
+]
+
+bp_norm_filt <- bp_norm_filt[order(bp_norm_filt$p_adjust), ]
+cat("BP terms (decreased in hypoxia):", nrow(bp_norm_filt), "\n")
+```
+
+### Results Visualization - GO Biological Process Enrichment
+
+```{r plot-GO-increased, fig.cap= "Gene Ontology Biological Process analysis displaying top 15 terms significantly enriched in genomic regions showing increased accessibility under hypoxia.", message=FALSE, warning=FALSE}
+ggplot(head(bp_hyp_filt, 15),
+       aes(fold_enrichment,
+           reorder(description, p_adjust),
+           size  = observed_region_hits,
+           color = -log10(p_adjust))) +
+  geom_point() +
+  scale_color_viridis_c() +
+  labs(title = "GO Biological Processes increased in hypoxia", x = "Fold enrichment", y = NULL)
+```
+
+```{r plot-GO-decreased, fig.cap= "Gene Ontology Biological Process analysis displaying top 15 terms significantly enriched in genomic regions showing decreased accessibility under hypoxia.", message=FALSE, warning=FALSE}
+ggplot(head(bp_norm_filt, 15),
+       aes(fold_enrichment,
+           reorder(description, p_adjust),
+           size  = observed_region_hits,
+           color = -log10(p_adjust))) +
+  geom_point() +
+  scale_color_viridis_c() +
+  labs(title = "GO Biological Processes decreased in hypoxia", x = "Fold enrichment", y = NULL)
+```
+
+### Results - GO Biological Process Enrichment
+Differential chromatin accessibility analysis of microglia co-cultured with glioma cells under hypoxia versus normoxia revealed two distinct epigenomic programs. Regions gaining accessibility under hypoxia were enriched for response to decreased oxygen levels, response to oxygen levels, PI3K/protein kinase B signaling, positive regulation of MAPK cascade, T cell differentiation, regulation of hematopoiesis, cell-substrate adhesion, and response to wounding, all with fold enrichments above 2.2 and adjusted p-values below $10^{-28}$ (see Figure \@ref(fig:plot-GO-increased)). Regions losing accessibility under hypoxia reflecting processes actively maintained under normoxia showed enrichment for extracellular matrix organization, extracellular structure organization, axonogenesis, glial cell differentiation, skeletal system morphogenesis, and bone development (see Figure \@ref(fig:plot-GO-decreased)).  
+Together, these results indicate that hypoxia drives BV2 microglia toward an oxygen-sensing, pro-inflammatory signaling state while simultaneously suppressing chromatin accessibility at loci associated with homeostatic glial identity and structural tissue programs.
+
+### Discussion - GO Biological Process Enrichment
+Our chromatin accessibility findings partially reproduce and extend those reported by Dzwigonska et al. The paper's RNA-seq GO enrichment identified response to hypoxia, response to oxygen levels, chemotaxis, cell migration, angiogenesis, and blood vessel morphogenesis as the top upregulated processes in hypoxic glioma co-cultured BV2 cells, while ribosome biogenesis, RNA processing, and DNA replication were downregulated [@dzwigonska_hypoxic_2025]. Our ATAC-seq-based enrichment recovers response to oxygen levels and response to decreased oxygen levels in the hypoxia-gained peaks, directly corroborating the paper's transcriptomic findings at the epigenomic level and suggesting these programs are regulated upstream through chromatin remodeling rather than solely through immediate HIF transcription factor activity. We additionally identify PI3K/PKB and MAPK cascade signaling and T cell differentiation and hematopoiesis regulation as hypoxia-gained chromatin programs, which the paper does not highlight in its ATAC-seq GO analysis. On the normoxia side, our finding that glial cell differentiation and extracellular matrix organization accessibility is lost under hypoxia aligns closely with the paper's central claim that hypoxia suppresses homeostatic microglial identity genes such as P2ry12 and Tmem119 through chromatin remodeling, and with their observation that hypoxia reduces accessibility at the P2ry12 promoter containing IRF8 and SPI1 binding sites [@dzwigonska_hypoxic_2025]. 
+
 ## Motif Enrichment Analysis
 
+In the next step, motif enrichment analysis will be performed to identify DNA motifs that are differentially accessible between hypoxic and normoxic conditions. Enriched motifs often reflect underlying transcription factor activity, although they do not prove direct transcription factor binding. They can therefore be used as a proxy for regulatory mechanisms shaping the condition-specific response.
+
+This analysis will include the following steps:  
+1. Annotate peaks with GC bias  
+2. Get a list of motifs  
+3. Scan the ATAC seq peaks for motif matches  
+4. Calculate the motif accessibility deviations  
+5. Perform differential analysis
+
+### Analysis
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+  fig.width = 8,
+  fig.height = 5,
+  fig.align = "left",
+  out.width = "80%"
+)
+```
+
+```{r, message=FALSE, warning=FALSE}
+theme_set(
+  theme_classic() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5)) #hjust = 0 to left align
+  )
+```
+
+#### Loading the count matrix
+
+```{r, message=FALSE, warning=FALSE}
+se <- readRDS("data/peakCounts.rds")
+colData(se)
+```
+
+In order for the `betterChromVAR` function to work, we need to remove peaks that have a zero value in every sample, because they contain no signal and can cause the background covariance calculation to fail.
+
+```{r remove-zero, message=FALSE, warning=FALSE}
+non_zero <- Matrix::rowSums(SummarizedExperiment::assay(se)) > 0
+se <- se[non_zero, ]
+```
+
+#### Annotate regions
+
+```{r annotation, message=FALSE, warning=FALSE}
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+seqlevelsStyle(se) <- "UCSC"
+se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
+```
+
+#### Motif matches
+
+To perform the motif annotations, we need a motif list. I will use the motif list from the `MotifDb`package.
+
+```{r motif-list, message=FALSE, warning=FALSE}
+motifs <- MotifDb::query(MotifDb, "HOCOMOCOv13")
+```
+
+Then we convert the motifs that they get accepted from `motifmatchr`.
+
+```{r, message=FALSE, warning=FALSE}
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+","",x@name)))
+```
+
+And now we will scan the ATAC peaks for motif matches.
+
+```{r motif-matches, message=FALSE, warning=FALSE}
+matches <- motifmatchr::matchMotifs(motifs, se, genome=BSgenome.Mmusculus.UCSC.mm10)
+matches
+```
+
+#### Get motif deviations
+
+Now we will get the motif deviations, showing the realtive accessibility of each motif in each sample.
+
+```{r motif-deviations, message=FALSE, warning=FALSE}
+dev <- betterChromVAR(se, matches)
+dev
+```
+
+The output is also a SummarizedExperiment, this time with samples as columns and motifs as rows. The values represent the relative accessibility of each motif in each sample.
+
+#### Differenial Analysis
+
+We can use these motif deviations to perform differential analysis.
+
+```{r, message=FALSE, warning=FALSE}
+# use normoxia as reference level
+dev$condition <- factor(dev$condition, levels = c("normoxia", "hypoxia"))
+```
+
+```{r DA, message=FALSE, warning=FALSE}
+design <- model.matrix(~condition, data=as.data.frame(colData(dev)))
+
+fit <- eBayes(lmFit(assay(dev, "z"), design))
+res <- as.data.frame(topTable(fit, number = Inf))
+res$motif <- row.names(res)
+```
+
+### Results Visualization - Motif Enrichment Analysis
+
+#### Volcano Plot Differential Analysis
+
+The volcano plot displays the differential motif accessibility between hypoxia and normoxia conditions, with annotations highlighting the top 10 most significantly enriched and repressed motifs.
+Additionally, HIF transcription factor family motifs are annotated, as these master regulators of the hypoxic response are expected to be enriched and more accessible in hypoxic conditions.
+
+```{r volcano-plot-DA, fig.cap="Volcano plot showing differential motif accessibility between hypoxia and normoxia conditions. Annotated points show the top 10 most significantly enriched and depleted motifs, as well as motifs belonging to the HIF transcription factor family.", message=FALSE, warning=FALSE}
+
+# color classification column
+res$diffexpressed <- "Not significant"
+res$diffexpressed[res$logFC > 0.6 & res$adj.P.Val < 0.05] <- "Enriched in hypoxia"
+res$diffexpressed[res$logFC < -0.6 & res$adj.P.Val < 0.05] <- "Repressed in hypoxia"
+
+# get the 10 up- and downregulated motifs for labelling
+res$my_labels <- NA
+
+# top 10 for hypoxia
+top_hypoxia <- res[res$diffexpressed == "Enriched in hypoxia", ]
+top_hypoxia <- top_hypoxia[order(top_hypoxia$adj.P.Val), ]
+top_hypoxia_motifs <- head(top_hypoxia$motif, 10)
+
+# top 10 for normoxia
+top_normoxia <- res[res$diffexpressed == "Repressed in hypoxia", ]
+top_normoxia <- top_normoxia[order(top_normoxia$adj.P.Val), ]
+top_normoxia_motifs <- head(top_normoxia$motif, 10)
+
+# annotate HIF-TF motifs
+hif_motifs <- grep("HIF1A|EPAS1|HIF2A|HIF3A|ARNT2?|HIF", res$motif, value = TRUE, ignore.case = TRUE)
+
+target_motifs <- unique(c(top_hypoxia_motifs, top_normoxia_motifs, hif_motifs))
+
+res$my_labels[res$motif %in% target_motifs] <- as.character(res$motif[res$motif %in% target_motifs])
+
+# plot
+ggplot(data = res, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed, label = my_labels)) +
+  geom_vline(xintercept = c(-0.6, 0.6), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+  geom_point(size = 2) + 
+  
+  scale_color_manual(values = c("Repressed in hypoxia" = "#00AFBB", 
+                                "Not significant" = "grey", 
+                                "Enriched in hypoxia" = "#bb0000")) + 
+  
+  labs(
+    title = "Differential Motif Accessibility Hypoxia vs. Normoxia",
+    color = "Condition Enrichment") +
+  #theme_classic() +
+  geom_text_repel(max.overlaps = Inf, show.legend = FALSE)
+```
+
+#### Heatmaps Differential Analysis
+To additionally look at the accessibility profiles across the individual replicates, we can look at the motifs of interest with a heatmap.
+
+```{r heatmap-repressed, fig.cap="Heatmap showing accessibility profiles across individual replicates for the most repressed motifs in hypoxia.", message=FALSE, warning=FALSE}
+col_rdbu <- hcl.colors(29, palette = "RdBu", rev = TRUE)
+
+col_conditions <- list(
+  condition = c("normoxia" = "lightgrey", "hypoxia" = "#252525")
+)
+
+res_repressed <- res[order(res$logFC, decreasing = FALSE), ]
+most_repressed_motifs <- head(row.names(res_repressed), 5)
+
+sechm(dev, most_repressed_motifs,
+      column_title = "Accessibility Profiles: Most repressed motifs in hypoxia",
+      column_title_gp = gpar(fontsize = 14, fontface = "bold"),
+      gaps_at = "condition", 
+      assayName = "z",
+      hmcols = col_rdbu,
+      anno_colors = col_conditions
+    )
+```
+
+```{r heatmap-enriched, fig.cap="Heatmap showing accessibility profiles across individual replicates for the top enriched motifs in hypoxia.", message=FALSE, warning=FALSE}
+col_rdbu <- hcl.colors(29, palette = "RdBu", rev = TRUE)
+
+col_conditions <- list(
+  condition = c("normoxia" = "lightgrey", "hypoxia" = "#252525")
+)
+
+# Sort res by logFC in descending order for enriched motifs
+res_enriched <- res[order(res$logFC, decreasing = TRUE), ]
+most_enriched_motifs <- head(row.names(res_enriched), 5)
+
+sechm(dev, most_enriched_motifs,
+      column_title = "Accessibility Profiles: most enriched motifs in hypoxia",
+      column_title_gp = gpar(fontsize = 14, fontface = "bold"),
+      gaps_at = "condition", 
+      assayName = "z",
+      hmcols = col_rdbu,
+      anno_colors = col_conditions
+    )
+```
+
+```{r heatmap-hif-motifs, fig.cap="Heatmap showing accessibility profiles across individual replicates for selected HIF family motifs.", message=FALSE, warning=FALSE}
+hif_motifs <- grep("HIF1A|EPAS1|HIF2A|HIF3A|ARNT2?|ARNT|HIF", rownames(dev), value = TRUE, ignore.case = TRUE)
+
+sechm(dev, hif_motifs,
+      column_title = "Accessibility Profiles: HIF family motifs",
+      column_title_gp = gpar(fontsize = 14, fontface = "bold"),
+      gaps_at = "condition",
+      assayName = "z",
+      hmcols = col_rdbu,
+      anno_colors = col_conditions
+      )
+```
+
+### Results - Motif Enrichment Analysis
+Motif enrichment analysis revealed distinct motifs that were differentially accessible between myeloid cells cultured under normoxic and hypoxic conditions.
+
+The motifs most strongly repressed upon hypoxia exposure belong to the ETS transcription factor family, including ELF5, ELF4, ELF2.1, and ETV4 (see Figure \@ref(fig:volcano-plot-DA)).
+Conversely, motifs belonging to the AP-1 family, including ATF3.2, JUND, JUNB, FOSL1, JUN, showed the most significant enrichment upon hypoxia exposure (see Figure \@ref(fig:volcano-plot-DA)).  
+
+To assess the consistency of these shifts across individual biological replicates, we examined the accessibility profiles using targeted heatmaps.
+The accessibility profiles of the ETS family motifs were highly cohesive within the respective treatment groups (see Figure \@ref(fig:heatmap-repressed)). In contrast, the AP-1 motifs showed differences among the hypoxic replicates, indicating the presence of a batch effect (see Figure \@ref(fig:heatmap-enriched)).  
+
+Given that hypoxia-inducible factors (HIFs) serve as the master transcriptional regulators of the hypoxic response, we specifically examined the behavior of HIF-family motifs. We hypothesized that HIF binding motifs would be enriched and more accessible under hypoxic condition.
+Interestingly, none of the core HIF-family motifs, including HIF-1α, HIF-2α, HIF-3α, and ARNT, showed a statistically significant difference in motif accessibility between normoxic and hypoxic culture conditions (see Figure \@ref(fig:volcano-plot-DA)).  
+
+Most HIF-family motifs show a consistent profile across the hypoxic replicates. Despite lacking statistical significance, there is a trend toward increased accessibility in the hypoxic condition. In contrast, the normoxic replicates exhibit noticeable inter-sample variation, splitting into two distinct baseline groups.
+A notable exception is ARNT2. It shows completely opposite trends between the two hypoxic replicates, with a decrease in accessibility in one sample and a sharp increase in the other, suggesting a potential batch effect (see Figure \@ref(fig:heatmap-hif-motifs)).
+
+### Discussion - Motif Enrichment Analysis
+Our analysis identified ETS transcription factor motifs to be strongly repressed upon hypoxic exposure in glioma associated myeloid cells. 
+The ETS transcription factor family comprises functional master regulators of myeloid cell identity and differentiation [@sharrocks_ets-domain_2001]. The observed downregulation of ETS family motif accessibility under hypoxic conditions indicates that the glioma-associated myeloid cells transition away from a homeostatic state, potentially altering their immunosuppressive phenotype. 
+
+In the primary paper, the authors filtered the motif enrichment results to focus exclusively on active motifs with high corresponding transcription factor expression [@dzwigonska_hypoxic_2025]. Our finding that ETS family motifs are strongly depleted under hypoxic conditions is nevertheless consistent with the paper's central argument that hypoxia acts as a potent suppressor of homeostatic myeloid cell identity.
+
+Additionally, we identified AP-1 family memebrs to be enriched in the hypoxic condition. 
+The AP-1 transcription factor family consists of proteins belonging to the JUN, FOS, and ATF subfamilies, which form dimeric complexes [@song_potential_2023].
+AP-1 is involved in a wide range of biological processes, including proliferation and differentiation, and has been shown to integrate cellular stress signals [@song_potential_2023].
+The observed enrichment of AP-1 motifs under hypoxia aligns well with established results in the literature. Hypoxia has been shown to act as a environmental stressor that strongly induces AP-1 in the tumor microenvironment. In myeloid cells specifically, recent studies have directly linked AP-1 activation to the promotion of tumor-supportive macrophage functions [@ku_master_2020].  
+Our findings also aligns with the primary publication, in which they found AP-1 motifs to be enriched in myeloid cells upon hypoxic exposure [@dzwigonska_hypoxic_2025].  
+
+Hypoxia-inducible factors (HIFs) serve as the master transcriptional regulators of the hypoxic response. Interestingly, our analysis did not show a statistical enrichment of HIF-family motifs upon hypoxic exposure.  
+This result stands in contrast to the primary paper, which reported a statistically significant enrichment of the classic HIF-1α/2α motifs following hypoxic exposure [@dzwigonska_hypoxic_2025].
+However, the primary paper explicitly noted that this motif enrichment was completely absent from promoter-only regions and could only be detected when the analysis was expanded to include broader genic regions encompassing both the promoters and gene bodies. A global analysis of core HIF motifs, as performed here, may therefore dilute this statistical signal due to high baseline variation in normoxic replicates and localized chromatin dynamics.
+
+
+## Comparison H3K27ac and ATAC-seq data
+
+In this part of the analysis, we integrate the ATAC-seq differential accessibility results from Part 02 with H3K27ac signal to assess how well chromatin accessibility and histone acetylation agree, both in overall signal level and in their response to hypoxia.
+
+This analysis will include the following steps:  
+1. Build signal matrices around consensus peaks for ATAC and H3K27ac separately  
+2. Visualize enrichment heatmaps for both marks  
+3. Correlate overall ATAC and H3K27ac signal per peak  
+4. Correlate hypoxia-induced changes in accessibility with the corresponding change in H3K27ac signal  
+5. Annotate the top differential peaks from each mark to their nearest genes  
+
+### Analysis
+
+#### Build signal matrices for ATAC and H3K27ac
+
+ATAC and H3K27ac bigWig files use different chromosome naming conventions. Because of this mismatch, the two sets of tracks cannot be passed to `signal2Matrix()` in a single call - each requires its own region set aligned to the corresponding naming style.
+
+```{r, message=FALSE, warning=FALSE}
+# BigWig tracks
+bwfiles_atac <- c(
+  ATAC_cc_N_n1 = "data/ATAC_narrowPeak/GSM8574833_BV2_cc_N_n1_ATACseq.bw",
+  ATAC_cc_N_n2 = "data/ATAC_narrowPeak/GSM8574834_BV2_cc_N_n2_ATACseq.bw",
+  ATAC_cc_H_n1 = "data/ATAC_narrowPeak/GSM8574835_BV2_cc_H_n1_ATACseq.bw",
+  ATAC_cc_H_n2 = "data/ATAC_narrowPeak/GSM8574836_BV2_cc_H_n2_ATACseq.bw"
+)
+
+bwfiles_h3k27ac <- c(
+  H3K27ac_cc_N_n1 = "data/ATAC_narrowPeak/GSM9058453_H3K27ac_cc_N_n1_CPM.bw",
+  H3K27ac_cc_N_n2 = "data/ATAC_narrowPeak/GSM9058454_H3K27ac_cc_N_n2_CPM.bw",
+  H3K27ac_cc_N_n3 = "data/ATAC_narrowPeak/GSM9058455_H3K27ac_cc_N_n3_CPM.bw",
+  H3K27ac_cc_H_n1 = "data/ATAC_narrowPeak/GSM9058456_H3K27ac_cc_H_n1_CPM.bw",
+  H3K27ac_cc_H_n2 = "data/ATAC_narrowPeak/GSM9058457_H3K27ac_cc_H_n2_CPM.bw",
+  H3K27ac_cc_H_n3 = "data/ATAC_narrowPeak/GSM9058458_H3K27ac_cc_H_n3_CPM.bw"
+)
+
+# narrowPeak files
+p1 <- import("data/ATAC_narrowPeak/GSM8574833_BV2_cc_N_n1.narrowPeak.gz")
+p2 <- import("data/ATAC_narrowPeak/GSM8574834_BV2_cc_N_n2.narrowPeak.gz")
+p3 <- import("data/ATAC_narrowPeak/GSM8574835_BV2_cc_H_n1.narrowPeak.gz")
+p4 <- import("data/ATAC_narrowPeak/GSM8574836_BV2_cc_H_n2.narrowPeak.gz")
+regions <- reduce(c(p1, p2, p3, p4))
+
+# align regions to UCSC style
+si_atac <- seqinfo(BigWigFile(bwfiles_atac[1]))
+regions_atac <- regions
+seqlevelsStyle(regions_atac) <- seqlevelsStyle(si_atac)
+common_atac <- intersect(seqlevels(regions_atac), seqlevels(si_atac))
+regions_atac <- keepSeqlevels(regions_atac, common_atac, pruning.mode = "coarse")
+seqinfo(regions_atac) <- si_atac[seqlevels(regions_atac)]
+
+sm_atac <- signal2Matrix(bwfiles_atac, regions_atac, w = 50)
+
+# align regions to NCBI style 
+si_h3k27ac <- seqinfo(BigWigFile(bwfiles_h3k27ac[1]))
+regions_h3k27ac <- regions
+seqlevelsStyle(regions_h3k27ac) <- seqlevelsStyle(si_h3k27ac)
+common_h3k27ac <- intersect(seqlevels(regions_h3k27ac), seqlevels(si_h3k27ac))
+regions_h3k27ac <- keepSeqlevels(regions_h3k27ac, common_h3k27ac, pruning.mode = "coarse")
+seqinfo(regions_h3k27ac) <- si_h3k27ac[seqlevels(regions_h3k27ac)]
+
+sm_h3k27ac <- signal2Matrix(bwfiles_h3k27ac, regions_h3k27ac, w = 50)
+
+sm_atac    <- renormalizeSignalMatrices(sm_atac, method = "top")
+sm_h3k27ac <- renormalizeSignalMatrices(sm_h3k27ac, method = "top")
+```
+
+```{r enrich-heatmap-atac, fig.cap="Enrichment heatmap of ATAC-seq signal around consensus peaks (normoxia vs hypoxia).", message=FALSE, warning=FALSE}
+ord <- order(rowMeans(assay(sm_atac)[[1]]), decreasing = TRUE)
+
+colnames(sm_atac) <- c("Normoxia R1", "Normoxia R2", "Hypoxia R1", "Hypoxia R2")
+
+plotEnrichedHeatmaps(
+  sm_atac, 
+  multiScale = TRUE, 
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"))
+```
+
+```{r enrich-heatmap-his, fig.width=10, fig.height=7, fig.cap="Enrichment heatmap of H3K27ac signal around the same consensus peaks (normoxia vs hypoxia).", message=FALSE, warning=FALSE}
+colnames(sm_h3k27ac) <- c("Normoxia R1", "Normoxia R2","Normoxia R3", "Hypoxia R1", "Hypoxia R2", "Hypoxia R3")
+
+plotEnrichedHeatmaps(
+  sm_h3k27ac, 
+  multiScale = TRUE,
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"))
+```
+
+The ATAC-seq heatmaps look broadly similar between conditions, with a sharp accessibility peak centered on the consensus regions in both normoxia and hypoxia, though hypoxia shows more high-intensity signal across a larger number of regions. The H3K27ac heatmaps also show sharp, centered peaks under normoxia, resembling the ATAC pattern, but under hypoxia the signal becomes much more diffuse and scattered around the center, resembling noise rather than a clean enrichment profile.
+
+#### Correlation of overall ATAC and H3K27ac signal
+
+We first ask whether, independent of condition, chromatin accessibility and H3K27ac signal agree at the level of individual peaks - i.e. whether more accessible regions also tend to carry more H3K27ac.
+
+```{r, message=FALSE, warning=FALSE}
+atac_mean    <- rowMeans(assay(sm_atac)[[1]])      
+h3k27ac_mean <- rowMeans(assay(sm_h3k27ac)[[1]])
+
+cor.test(atac_mean, h3k27ac_mean, method = "spearman")
+
+df <- data.frame(ATAC = atac_mean, H3K27ac = h3k27ac_mean)
+```
+
+The overall (condition-independent) ATAC and H3K27ac signal levels show a strong, highly significant positive correlation (Spearman's $\rho = 0.64, p < 2.2 \times 10^{-16}$), indicating that regions with more accessible chromatin also tend to carry higher H3K27ac signal, as expected for active regulatory regions.
+
+#### Correlation of hypoxia-induced changes between ATAC and H3K27ac
+
+We then ask a more specific question: do peaks that gain or lose accessibility under hypoxia (as quantified by ATAC logFC from Part 02) also show a corresponding change in H3K27ac signal? Since the ATAC peak set from Part 02 and the H3K27ac region set built above were derived independently, peaks are first matched by genomic overlap before comparing values.
+
+```{r, message=FALSE, warning=FALSE}
+data <- readRDS("results_da/part1_results.rds")
+res  <- data$res
+se   <- data$se
+
+peaks_res <- rowRanges(se)
+
+peaks_res_ncbi <- peaks_res
+seqlevelsStyle(peaks_res_ncbi) <- seqlevelsStyle(regions_h3k27ac)
+
+hits <- findOverlaps(peaks_res_ncbi, regions_h3k27ac, select = "first")
+keep <- !is.na(hits)
+sum(keep)   
+
+keep <- !is.na(hits)
+peaks_res_matched <- peaks_res[keep]
+
+res_matched  <- res[keep, ]
+h3k27ac_idx  <- hits[keep]
+
+N_mats <- assay(sm_h3k27ac)[c("Normoxia R1", "Normoxia R2", "Normoxia R3")]
+H_mats <- assay(sm_h3k27ac)[c("Hypoxia R1", "Hypoxia R2", "Hypoxia R3")]
+
+h3k27ac_N_signal <- Reduce(`+`, lapply(N_mats, rowMeans)) / length(N_mats)
+h3k27ac_H_signal <- Reduce(`+`, lapply(H_mats, rowMeans)) / length(H_mats)
+
+h3k27ac_N_signal <- h3k27ac_N_signal[h3k27ac_idx]
+h3k27ac_H_signal <- h3k27ac_H_signal[h3k27ac_idx]
+
+h3k27ac_diff <- h3k27ac_H_signal - h3k27ac_N_signal
+
+cor.test(res_matched$logFC, h3k27ac_diff, method = "spearman")
+```
+
+In contrast to the strong correlation in overall signal level, the hypoxia-induced change in accessibility (ATAC logFC) shows essentially no correlation with the change in H3K27ac signal (Spearman's $\rho = -0.007, p = 0.19, n.s.$), indicating that although accessible and H3K27ac-marked regions overlap substantially at baseline, their dynamic response to hypoxia is not tightly coupled at the level of individual peaks.
+
+#### Annotation of top differential peaks to nearest genes
+
+To interpret whether the peaks driving each modality's signal correspond to biologically meaningful loci, the top 200 most changed peaks by ATAC logFC and by H3K27ac difference are each annotated to their nearest gene, allowing comparison of the gene sets implicated by each mark.
+
+```{r, message=FALSE, warning=FALSE}
+ah <- AnnotationHub()
+ensdb <- ah[["AH89211"]]  # GRCm38 (mm10) Ensembl as in Part 2
+
+top_atac <- peaks_res_matched[order(abs(res_matched$logFC), decreasing = TRUE)][1:200]
+seqlevelsStyle(top_atac) <- "NCBI"  
+
+top_h3k27ac <- peaks_res_matched[order(abs(h3k27ac_diff), decreasing = TRUE)][1:200]
+seqlevelsStyle(top_h3k27ac) <- "NCBI"
+
+anno_atac    <- annotatePeak(top_atac,    TxDb = ensdb, tssRegion = c(-3000, 3000))
+anno_h3k27ac <- annotatePeak(top_h3k27ac, TxDb = ensdb, tssRegion = c(-3000, 3000))
+```
+
+```{r, message=FALSE, warning=FALSE}
+df_atac    <- as.data.frame(anno_atac)
+df_h3k27ac <- as.data.frame(anno_h3k27ac)
+
+genes_db <- genes(ensdb)
+
+df_atac$SYMBOL    <- genes_db$symbol[match(df_atac$geneId,    genes_db$gene_id)]
+df_h3k27ac$SYMBOL <- genes_db$symbol[match(df_h3k27ac$geneId, genes_db$gene_id)]
+
+head(df_atac[, c("seqnames", "start", "end", "annotation", "geneId", "SYMBOL")])
+head(df_h3k27ac[, c("seqnames", "start", "end", "annotation", "geneId", "SYMBOL")])
+genes_atac    <- unique(na.omit(df_atac$SYMBOL))
+genes_h3k27ac <- unique(na.omit(df_h3k27ac$SYMBOL))
+
+length(genes_atac)
+length(genes_h3k27ac)
+
+overlap_genes <- intersect(genes_atac, genes_h3k27ac)
+length(overlap_genes)
+overlap_genes
+```
+
+The top 200 most changed ATAC peaks and top 200 most changed H3K27ac regions were annotated to their nearest genes and mapped to gene symbols. Of 182 unique ATAC-associated genes and 181 unique H3K27ac-associated genes, only 3 were shared (Cflar, Aida, Gm29282), indicating that the loci most strongly affected by hypoxia largely differ between the two chromatin marks, consistent with the lack of correlation observed above.
+
+### Results - Comparison H3K27ac and ATAC-seq data
+We assessed concordance between ATAC-seq accessibility and H3K27ac signal at consensus peaks in BV2-glioma co-cultures under hypoxia and normoxia. Enrichment heatmaps showed sharp, centered signal for both marks; ATAC patterns were similar between conditions (with more high-intensity signal under hypoxia), while H3K27ac was well-organized under normoxia but notably more diffuse under hypoxia (see Figure \@ref(fig:enrich-heatmap-atac), \@ref(fig:enrich-heatmap-his)). Overall signal levels of ATAC and H3K27ac were strongly correlated
+(Spearman's $\rho = 0.64, p < 2.2 \times 10^{-16}$).
+We then compared the statistically tested ATAC differential accessibility (logFC from the edgeR exact test in `Part 02 Differential Chromatin Accessibility`) to the H3K27ac signal difference between conditions, averaged across all three available replicates per condition; these showed no significant correlation ($\rho = -0.004, p = 0.50, n.s.$). Consistent with this, only 3 of the top 200 genes (Cflar, Aida, Gm29282) were shared between the most strongly changed ATAC peaks and the largest raw H3K27ac signal differences.
+
+### Discussion - Comparison H3K27ac and ATAC-seq data
+These results indicate that while accessible chromatin and H3K27ac co-localize at baseline, their response to hypoxia appears largely uncoupled - both in signal dynamics and in the specific loci affected.
+This aligns broadly with Dzwigonska et al., who reported a global decrease in H3K27ac under hypoxia in BV2 cells, linked to increased HDAC activity, and showed that pharmacologically restoring H3K27ac (via the HDAC inhibitor panobinostat) could partially reverse specific hypoxia-induced transcriptional changes (e.g., rescuing Tmem119 expression) [@dzwigonska_hypoxic_2025]. While the original study did not directly compare ATAC-seq accessibility changes to H3K27ac changes at the level of individual peaks, their finding that H3K27ac is regulated through a distinct enzymatic mechanism (HDAC activity) rather than being a passive readout of chromatin accessibility is broadly consistent with the uncoupling we observe here between ATAC and H3K27ac dynamics under hypoxia.
+
 # Conclusion
+Overall, our reproduction successfully captured the major biological conclusions reported by Dzwigonska et al.. First differential accessibility analysis demonstrated widespread bidirectional chromatin remodeling in response to hypoxia.
+Our differential accessibility discussion further highlighted specific hypoxia-linked loci, including Gpr137c, Gpd1l, and vesicular trafficking genes, suggesting an additional metabolic and intracellular transport component to this remodeling.
+Second, GO enrichment identified oxygen response, signaling, and inflammatory-related biological processes associated with these chromatin changes. And third, motif enrichment confirmed depletion of ETS motifs together with enrichment of AP-1 family transcription factors, supporting the proposed shift from a homeostatic to a hypoxia-responsive myeloid state.
+Our comparison of ATAC-seq and H3K27ac further showed strong baseline co-localization but largely uncoupled hypoxia-induced dynamics, indicating that these two chromatin marks respond to hypoxia through partly distinct regulatory mechanisms.
+Although our analyses reproduced the principal epigenomic trends described in the original study, they recovered broader and less specific biological pathways and did not fully reproduce all reported HIF-related findings. These differences are likely due to the fact that our reproduction relied primarily on ATAC-seq analyses, whereas the original publication integrated multiple complementary datasets, including RNA-seq and additional regulatory analyses. Nevertheless, our results support the central conclusion which is that hypoxia extensively remodels the chromatin landscape of glioma-associated microglia, thereby promoting transcriptional programs associated with tumor adaptation and immune reprogramming.
 
 # References
