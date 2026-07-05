@@ -1,22 +1,25 @@
 ---
-title: "05_Histone_analysis"
-output: html_document
+title: "05 Comparison H3K27ac and ATAC-seq data"
+output: bookdown::html_document2
 date: "2026-07-01"
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/ieee.csl
+link-citations: true
 ---
 
+In this part of the analysis, we integrate the ATAC-seq differential accessibility results from Part 02 with H3K27ac signal to assess how well chromatin accessibility and histone acetylation agree, both in overall signal level and in their response to hypoxia.
 
-In this part of the analysis, we integrate the ATAC-seq differential accessibility results from Part 1 with H3K27ac signal to assess how well chromatin accessibility and histone acetylation agree, both in overall signal level and in their response to hypoxia.
+This analysis will include the following steps:  
+1. Build signal matrices around consensus peaks for ATAC and H3K27ac separately  
+2. Visualize enrichment heatmaps for both marks  
+3. Correlate overall ATAC and H3K27ac signal per peak  
+4. Correlate hypoxia-induced changes in accessibility with the corresponding change in H3K27ac signal  
+5. Annotate the top differential peaks from each mark to their nearest genes  
 
-1. Build signal matrices around consensus peaks for ATAC and H3K27ac separately
-2. Visualize enrichment heatmaps for both marks
-3. Correlate overall ATAC and H3K27ac signal per peak
-4. Correlate hypoxia-induced changes in accessibility with the corresponding change in H3K27ac signal
-5. Annotate the top differential peaks from each mark to their nearest genes
+## Analysis
+### Setup
 
-## setup
-
-```{r}
-
+```{r, message=FALSE, warning=FALSE}
 suppressPackageStartupMessages({
   library(ensembldb)
   library(GenomicRanges)
@@ -27,20 +30,14 @@ suppressPackageStartupMessages({
   library(AnnotationHub)
   library(ChIPseeker)
   library(ggplot2)})
-
-
 ```
-
 
 ## Build signal matrices for ATAC and H3K27ac
 
 ATAC and H3K27ac bigWig files use different chromosome naming conventions. Because of this mismatch, the two sets of tracks cannot be passed to `signal2Matrix()` in a single call - each requires its own region set aligned to the corresponding naming style.
 
-
-```{r}
-
-
-##  BigWig tracks
+```{r, message=FALSE, warning=FALSE}
+# BigWig tracks
 bwfiles_atac <- c(
   ATAC_cc_N_n1 = "data/ATAC_narrowPeak/GSM8574833_BV2_cc_N_n1_ATACseq.bw",
   ATAC_cc_N_n2 = "data/ATAC_narrowPeak/GSM8574834_BV2_cc_N_n2_ATACseq.bw",
@@ -57,15 +54,14 @@ bwfiles_h3k27ac <- c(
   H3K27ac_cc_H_n3 = "data/ATAC_narrowPeak/GSM9058458_H3K27ac_cc_H_n3_CPM.bw"
 )
 
-## narrowPeak files
+# narrowPeak files
 p1 <- import("data/ATAC_narrowPeak/GSM8574833_BV2_cc_N_n1.narrowPeak.gz")
 p2 <- import("data/ATAC_narrowPeak/GSM8574834_BV2_cc_N_n2.narrowPeak.gz")
 p3 <- import("data/ATAC_narrowPeak/GSM8574835_BV2_cc_H_n1.narrowPeak.gz")
 p4 <- import("data/ATAC_narrowPeak/GSM8574836_BV2_cc_H_n2.narrowPeak.gz")
 regions <- reduce(c(p1, p2, p3, p4))
 
-
-## align regions to UCSC style
+# align regions to UCSC style
 si_atac <- seqinfo(BigWigFile(bwfiles_atac[1]))
 regions_atac <- regions
 seqlevelsStyle(regions_atac) <- seqlevelsStyle(si_atac)
@@ -75,7 +71,7 @@ seqinfo(regions_atac) <- si_atac[seqlevels(regions_atac)]
 
 sm_atac <- signal2Matrix(bwfiles_atac, regions_atac, w = 50)
 
-##  align regions to NCBI style 
+# align regions to NCBI style 
 si_h3k27ac <- seqinfo(BigWigFile(bwfiles_h3k27ac[1]))
 regions_h3k27ac <- regions
 seqlevelsStyle(regions_h3k27ac) <- seqlevelsStyle(si_h3k27ac)
@@ -85,57 +81,52 @@ seqinfo(regions_h3k27ac) <- si_h3k27ac[seqlevels(regions_h3k27ac)]
 
 sm_h3k27ac <- signal2Matrix(bwfiles_h3k27ac, regions_h3k27ac, w = 50)
 
-
 sm_atac    <- renormalizeSignalMatrices(sm_atac, method = "top")
 sm_h3k27ac <- renormalizeSignalMatrices(sm_h3k27ac, method = "top")
-
-
-
 ```
 
-```{r, fig.cap="Enrichment heatmap of ATAC-seq signal around consensus peaks (normoxia vs hypoxia)."}
+```{r enrich-heatmap-atac, fig.cap="Enrichment heatmap of ATAC-seq signal around consensus peaks (normoxia vs hypoxia).", message=FALSE, warning=FALSE}
 ord <- order(rowMeans(assay(sm_atac)[[1]]), decreasing = TRUE)
-plotEnrichedHeatmaps(sm_atac, multiScale = TRUE)
+
+colnames(sm_atac) <- c("Normoxia R1", "Normoxia R2", "Hypoxia R1", "Hypoxia R2")
+
+plotEnrichedHeatmaps(
+  sm_atac, 
+  multiScale = TRUE, 
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"))
 ```
 
+```{r enrich-heatmap-his, fig.width=10, fig.height=7, fig.cap="Enrichment heatmap of H3K27ac signal around the same consensus peaks (normoxia vs hypoxia).", message=FALSE, warning=FALSE}
+colnames(sm_h3k27ac) <- c("Normoxia R1", "Normoxia R2","Normoxia R3", "Hypoxia R1", "Hypoxia R2", "Hypoxia R3")
 
-
-```{r, fig.cap="Enrichment heatmap of H3K27ac signal around the same consensus peaks (normoxia vs hypoxia)."}
-plotEnrichedHeatmaps(sm_h3k27ac, multiScale = TRUE, 
-                     column_title_gp = grid::gpar(fontsize = 6))
+plotEnrichedHeatmaps(
+  sm_h3k27ac, 
+  multiScale = TRUE,
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"))
 ```
-## Interpretation
 
 The ATAC-seq heatmaps look broadly similar between conditions, with a sharp accessibility peak centered on the consensus regions in both normoxia and hypoxia, though hypoxia shows more high-intensity signal across a larger number of regions. The H3K27ac heatmaps also show sharp, centered peaks under normoxia, resembling the ATAC pattern, but under hypoxia the signal becomes much more diffuse and scattered around the center, resembling noise rather than a clean enrichment profile.
-
-
 
 ## Correlation of overall ATAC and H3K27ac signal
 
 We first ask whether, independent of condition, chromatin accessibility and H3K27ac signal agree at the level of individual peaks - i.e. whether more accessible regions also tend to carry more H3K27ac.
 
-
-```{r}
-
+```{r, message=FALSE, warning=FALSE}
 atac_mean    <- rowMeans(assay(sm_atac)[[1]])      
 h3k27ac_mean <- rowMeans(assay(sm_h3k27ac)[[1]])
 
 cor.test(atac_mean, h3k27ac_mean, method = "spearman")
 
 df <- data.frame(ATAC = atac_mean, H3K27ac = h3k27ac_mean)
-
 ```
-The overall (condition-independent) ATAC and H3K27ac signal levels show a strong, highly significant positive correlation (Spearman's rho = 0.64, p < 2.2e-16), indicating that regions with more accessible chromatin also tend to carry higher H3K27ac signal, as expected for active regulatory regions.
 
+The overall (condition-independent) ATAC and H3K27ac signal levels show a strong, highly significant positive correlation (Spearman's $\rho = 0.64, p < 2.2 \times 10^{-16}$), indicating that regions with more accessible chromatin also tend to carry higher H3K27ac signal, as expected for active regulatory regions.
 
 ## Correlation of hypoxia-induced changes between ATAC and H3K27ac
 
-We then ask a more specific question: do peaks that gain or lose accessibility under hypoxia (as quantified by ATAC logFC from Part 1) also show a corresponding change in H3K27ac signal? Since the ATAC peak set from Part 1 and the H3K27ac region set built above were derived independently, peaks are first matched by genomic overlap before comparing values.
+We then ask a more specific question: do peaks that gain or lose accessibility under hypoxia (as quantified by ATAC logFC from Part 02) also show a corresponding change in H3K27ac signal? Since the ATAC peak set from Part 02 and the H3K27ac region set built above were derived independently, peaks are first matched by genomic overlap before comparing values.
 
-
-
-```{r}
-
+```{r, message=FALSE, warning=FALSE}
 data <- readRDS("results_da/part1_results.rds")
 res  <- data$res
 se   <- data$se
@@ -149,48 +140,35 @@ hits <- findOverlaps(peaks_res_ncbi, regions_h3k27ac, select = "first")
 keep <- !is.na(hits)
 sum(keep)   
 
-
 keep <- !is.na(hits)
 peaks_res_matched <- peaks_res[keep]
-
-
 
 res_matched  <- res[keep, ]
 h3k27ac_idx  <- hits[keep]
 
-
-N_mats <- assay(sm_h3k27ac)[c("H3K27ac_cc_N_n1", "H3K27ac_cc_N_n2", "H3K27ac_cc_N_n3")]
-H_mats <- assay(sm_h3k27ac)[c("H3K27ac_cc_H_n1", "H3K27ac_cc_H_n2", "H3K27ac_cc_H_n3")]
-
+N_mats <- assay(sm_h3k27ac)[c("Normoxia R1", "Normoxia R2", "Normoxia R3")]
+H_mats <- assay(sm_h3k27ac)[c("Hypoxia R1", "Hypoxia R2", "Hypoxia R3")]
 
 h3k27ac_N_signal <- Reduce(`+`, lapply(N_mats, rowMeans)) / length(N_mats)
 h3k27ac_H_signal <- Reduce(`+`, lapply(H_mats, rowMeans)) / length(H_mats)
-
 
 h3k27ac_N_signal <- h3k27ac_N_signal[h3k27ac_idx]
 h3k27ac_H_signal <- h3k27ac_H_signal[h3k27ac_idx]
 
 h3k27ac_diff <- h3k27ac_H_signal - h3k27ac_N_signal
 
-
 cor.test(res_matched$logFC, h3k27ac_diff, method = "spearman")
-
-
-
 ```
- In contrast to the strong correlation in overall signal level, the hypoxia-induced change in accessibility (ATAC logFC) shows essentially no correlation with the change in H3K27ac signal (Spearman's rho = -0.007, p = 0.19, n.s.), indicating that although accessible and H3K27ac-marked regions overlap substantially at baseline, their dynamic response to hypoxia is not tightly coupled at the level of individual peaks.
 
-
+In contrast to the strong correlation in overall signal level, the hypoxia-induced change in accessibility (ATAC logFC) shows essentially no correlation with the change in H3K27ac signal (Spearman's $\rho = -0.007, p = 0.19, n.s.$), indicating that although accessible and H3K27ac-marked regions overlap substantially at baseline, their dynamic response to hypoxia is not tightly coupled at the level of individual peaks.
 
 ## Annotation of top differential peaks to nearest genes
 
 To interpret whether the peaks driving each modality's signal correspond to biologically meaningful loci, the top 200 most changed peaks by ATAC logFC and by H3K27ac difference are each annotated to their nearest gene, allowing comparison of the gene sets implicated by each mark.
 
-
-```{r}
-
+```{r, message=FALSE, warning=FALSE}
 ah <- AnnotationHub()
-ensdb <- ah[["AH89211"]]  # GRCm38 (mm10) Ensembl as in Part 1
+ensdb <- ah[["AH89211"]]  # GRCm38 (mm10) Ensembl as in Part 2
 
 top_atac <- peaks_res_matched[order(abs(res_matched$logFC), decreasing = TRUE)][1:200]
 seqlevelsStyle(top_atac) <- "NCBI"  
@@ -201,8 +179,8 @@ seqlevelsStyle(top_h3k27ac) <- "NCBI"
 anno_atac    <- annotatePeak(top_atac,    TxDb = ensdb, tssRegion = c(-3000, 3000))
 anno_h3k27ac <- annotatePeak(top_h3k27ac, TxDb = ensdb, tssRegion = c(-3000, 3000))
 ```
-```{r}
 
+```{r, message=FALSE, warning=FALSE}
 df_atac    <- as.data.frame(anno_atac)
 df_h3k27ac <- as.data.frame(anno_h3k27ac)
 
@@ -223,13 +201,14 @@ overlap_genes <- intersect(genes_atac, genes_h3k27ac)
 length(overlap_genes)
 overlap_genes
 ```
+
 The top 200 most changed ATAC peaks and top 200 most changed H3K27ac regions were annotated to their nearest genes and mapped to gene symbols. Of 182 unique ATAC-associated genes and 181 unique H3K27ac-associated genes, only 3 were shared (Cflar, Aida, Gm29282), indicating that the loci most strongly affected by hypoxia largely differ between the two chromatin marks, consistent with the lack of correlation observed above.
 
-## Results
+## Comparison H3K27ac and ATAC-seq data - Results
+We assessed concordance between ATAC-seq accessibility and H3K27ac signal at consensus peaks in BV2-glioma co-cultures under hypoxia and normoxia. Enrichment heatmaps showed sharp, centered signal for both marks; ATAC patterns were similar between conditions (with more high-intensity signal under hypoxia), while H3K27ac was well-organized under normoxia but notably more diffuse under hypoxia (see Figure \@ref(fig:enrich-heatmap-atac), \@ref(fig:enrich-heatmap-his)). Overall signal levels of ATAC and H3K27ac were strongly correlated
+(Spearman's $\rho = 0.64, p < 2.2 \times 10^{-16}$).
+We then compared the statistically tested ATAC differential accessibility (logFC from the edgeR exact test in `Part 02 Differential Chromatin Accessibility`) to the H3K27ac signal difference between conditions, averaged across all three available replicates per condition; these showed no significant correlation ($\rho = -0.004, p = 0.50, n.s.$). Consistent with this, only 3 of the top 200 genes (Cflar, Aida, Gm29282) were shared between the most strongly changed ATAC peaks and the largest raw H3K27ac signal differences.
 
-We assessed concordance between ATAC-seq accessibility and H3K27ac signal at consensus peaks in BV2-glioma co-cultures under hypoxia and normoxia. Enrichment heatmaps showed sharp, centered signal for both marks; ATAC patterns were similar between conditions (with more high-intensity signal under hypoxia), while H3K27ac was well-organized under normoxia but notably more diffuse under hypoxia. Overall signal levels of ATAC and H3K27ac were strongly correlated (Spearman's rho = 0.64, p < 2.2e-16). We then compared the statistically tested ATAC differential accessibility (logFC from the edgeR exact test in Part 1) to the H3K27ac signal difference between conditions, averaged across all three available replicates per condition; these showed no significant correlation (rho = -0.004, p = 0.50, n.s.). Consistent with this, only 3 of the top 200 genes (Cflar, Aida, Gm29282) were shared between the most strongly changed ATAC peaks and the largest raw H3K27ac signal differences.
-
-## Discussion
-
-These results indicate that while accessible chromatin and H3K27ac co-localize at baseline, their response to hypoxia appears largely uncoupled - both in signal dynamics and in the specific loci affected. ## Discussion (corrected)
-This aligns broadly with Dzwigonska et al. (2025), who reported a global decrease in H3K27ac under hypoxia in BV2 cells, linked to increased HDAC activity, and showed that pharmacologically restoring H3K27ac (via the HDAC inhibitor panobinostat) could partially reverse specific hypoxia-induced transcriptional changes (e.g., rescuing Tmem119 expression). While the original study did not directly compare ATAC-seq accessibility changes to H3K27ac changes at the level of individual peaks, their finding that H3K27ac is regulated through a distinct enzymatic mechanism (HDAC activity) rather than being a passive readout of chromatin accessibility is broadly consistent with the uncoupling we observe here between ATAC and H3K27ac dynamics under hypoxia.
+## Comparison H3K27ac and ATAC-seq data - Discussion
+These results indicate that while accessible chromatin and H3K27ac co-localize at baseline, their response to hypoxia appears largely uncoupled - both in signal dynamics and in the specific loci affected.
+This aligns broadly with Dzwigonska et al., who reported a global decrease in H3K27ac under hypoxia in BV2 cells, linked to increased HDAC activity, and showed that pharmacologically restoring H3K27ac (via the HDAC inhibitor panobinostat) could partially reverse specific hypoxia-induced transcriptional changes (e.g., rescuing Tmem119 expression) [@dzwigonska_hypoxic_2025]. While the original study did not directly compare ATAC-seq accessibility changes to H3K27ac changes at the level of individual peaks, their finding that H3K27ac is regulated through a distinct enzymatic mechanism (HDAC activity) rather than being a passive readout of chromatin accessibility is broadly consistent with the uncoupling we observe here between ATAC and H3K27ac dynamics under hypoxia.
