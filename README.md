@@ -9,7 +9,7 @@ The goal of this project was to investigate the epigenetic effects of hypoxic st
 - **Submission Date:** 03 July 2026
 
 ## Project Structure
-- The `FinalReport.Rmd` (and compiled version `FinalReport.html`) contains our complete workflow including Introduction, fully embedded Analysis code, Results and Discussion for each section and a final Conclusion. 
+- The `FinalReport.Rmd` (and compiled version `FinalReport.html`) contains our complete workflow including Introduction, fully embedded Analysis code, Results and Discussion for each section and a final Conclusion. We suppressed messages and warnings from the code section to assure a better readability.
 
 - We have intially divided our work into separate analysis files (`01_download.Rmd`,`02_differential_anaylsis.Rmd`,`03_GO_enrichment.Rmd`,`04_motif_enrichment.Rmd`). We have retained these if you want to inspect or run specific parts of the analysis in isolation.
 
