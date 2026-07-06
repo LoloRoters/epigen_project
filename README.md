@@ -6,7 +6,7 @@ The goal of this project was to investigate the epigenetic effects of hypoxic st
 ## Project Information
 
 - **Group members:** Olga Ledeneva, Yara Roth and Julia Shea  
-- **Submission Date:** 03 July 2026
+- **Submission Date:** 06 July 2026
 
 ## Project Structure
 - The `FinalReport.Rmd` (and compiled version `FinalReport.html`) contains our complete workflow including Introduction, fully embedded Analysis code, Results and Discussion for each section and a final Conclusion. We suppressed messages and warnings from the code section to assure a better readability.
