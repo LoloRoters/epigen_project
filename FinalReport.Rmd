@@ -1,8 +1,12 @@
 ---
 title: "The effect of hypoxic stress on glioma-associated myeloid cells"
 author: "Olga Ledeneva, Yara Roth, Julia Shea"
-date: "2026-07-03"
-output: bookdown::html_document2
+date: "2026-07-06"
+output: 
+  bookdown::html_document2:
+    toc: true
+    toc_depth: 3
+    toc_float: true
 bibliography: references.bib
 csl: https://raw.githubusercontent.com/citation-style-language/styles/master/ieee.csl
 link-citations: true
@@ -20,7 +24,8 @@ We worked with data from microglia-glioma co-cultures that were exposed to a hyp
 To capture global epigenetic changes, the authors performed two high-throughput sequencing methods. First, they used ATAC-seq to profile changes in chromatin accessibility, and secondly, they performed CUT&RUN sequencing to map the H3K27ac histone modification, which marks active promoter and enhancer regions.  
 
 Our computational analysis was structured into four five components to comprehensively evaluate the epigenomic effects of hypoxia:  
-1.**Data downloading** of ATAC-seq and CUT&RUN data.
+
+1. **Data downloading** of ATAC-seq and CUT&RUN data.
 
 2. **Differential accessibility analysis** was performed to identify regions of chromatin that underwent significant structural changes upon hypoxic exposure.
 
@@ -33,7 +38,7 @@ Our computational analysis was structured into four five components to comprehen
 # Analysis
 
 ## General Setup
-```{r, message=FALSE, warning=FALSE}
+```{r setup, message=FALSE, warning=FALSE}
 suppressPackageStartupMessages({
   library(bookdown)
   
@@ -90,11 +95,16 @@ dir.create("data")
 ```
 
 ```{r downlaod-bamfiles, message=FALSE, warning=FALSE}
-options(timeout = 3600)
+options(timeout = 60000)
 
-download.file("https://polybox.ethz.ch/index.php/s/H9sDxbT7qTHsyLg/download", destfile = "data/data.tar", mode = "wb")
-untar("data/data.tar", exdir = "data")
-file.remove("data/data.tar")
+if (!file.exists("data/ATAC/SraRunTable_hypoxia_ATAC.csv")) {
+  download.file(
+    "https://polybox.ethz.ch/index.php/s/H9sDxbT7qTHsyLg/download",
+    destfile = "data/data.tar",
+    mode = "wb")
+  untar("data/data.tar", exdir = "data")
+  file.remove("data/data.tar")
+}
 ```
 
 We will also download the narrowpeak files from the NCBI GEO repository (GSE300330).
@@ -102,16 +112,20 @@ We will also download the narrowpeak files from the NCBI GEO repository (GSE3003
 ```{r download-narrowpeak, message=FALSE, warning=FALSE}
 dir.create("data/ATAC_narrowPeak")
 
-download.file("https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE300330&format=file", destfile = "data/ATAC_narrowPeak/GSE300330_RAW.tar", mode = "wb")
-untar("data/ATAC_narrowPeak/GSE300330_RAW.tar", exdir = "data/ATAC_narrowPeak")
-file.remove("data/ATAC_narrowPeak/GSE300330_RAW.tar")
+if (!file.exists("data/ATAC_narrowPeak/GSM8574789_BV2_ctrl_N_n1_RNAseq.bw")) {
+  download.file("https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE300330&format=file",
+                destfile = "data/ATAC_narrowPeak/GSE300330_RAW.tar",
+                mode = "wb")
+  untar("data/ATAC_narrowPeak/GSE300330_RAW.tar", exdir = "data/ATAC_narrowPeak")
+  file.remove("data/ATAC_narrowPeak/GSE300330_RAW.tar")
+}
 ```
 
 ## Differential Chromatin Accessibility
 
 In the first part of the analysis, we identify genomic regions whose chromatin accessibility differs between BV2 microglial cells co-cultured with glioma cells under hypoxia versus normoxia. Differentially accessible peaks often mark regulatory regions (promoters, enhancers) that are dynamically remodeled in response to hypoxic stress, although accessibility changes alone do not prove that a region is actively driving transcription. They can therefore be used as a starting point for downstream functional enrichment analysis (Part 3), and can be compared with histone modification data to support or refine interpretation of regulatory activity (Part 5).
 
-This analysis will include the following steps:
+This analysis will include the following steps:  
 1. Define the sample sheet  
 2. Create consensus peak set  
 3. Count ATAC-seq reads from each BAM file over the consensus peaks  
@@ -130,7 +144,7 @@ Sample metadata were first inspected by loading the SraRunTable_hypoxia_ATAC.csv
 ATAC_CSV <- read.csv("data/ATAC/SraRunTable_hypoxia_ATAC.csv")
 ```
 
-```{r, message=FALSE, warning=FALSE}
+```{r sample-sheet, message=FALSE, warning=FALSE}
 # Manually define the sample sheet: GEO/SRA accessions, matched to experimental condition (hypoxia vs normoxia) and biological replicate
 
 samples <- data.frame(
@@ -243,7 +257,7 @@ To interpret the differential accessibility results biologically, the 20 most si
 
 ```{r, message=FALSE, warning=FALSE}
 ah <- AnnotationHub()
-query_results <- query(ah, c("Mus musculus", "EnsDb","GRCm38"))
+query_results <- AnnotationHub::query(ah, c("Mus musculus", "EnsDb","GRCm38"))
 ```
 
 ```{r, message=FALSE, warning=FALSE}
@@ -284,7 +298,7 @@ saveRDS(list(
 ), file = file.path("results_da", "part1_results.rds"))
 ```
 
-```{r volcano-plot-DA-part2, fig.cap="Volcano plot of differential chromatin accessibility between hypoxic and normoxic BV2-glioma co-cultures.", message=FALSE, warning=FALSE}
+```{r volcano-plot-DA-part2,fig.width=8, fig.height=8, fig.cap="Volcano plot of differential chromatin accessibility between hypoxic and normoxic BV2-glioma co-cultures.", message=FALSE, warning=FALSE}
 # color classification column
 res$diffexpressed <- "Not significant"
 res$diffexpressed[res$logFC > 0.6 & res$FDR < 0.05] <- "Enriched in hypoxia"
@@ -308,8 +322,6 @@ ggplot(data = res, aes(x = logFC, y = -log10(FDR), col = diffexpressed, label = 
     title = "Differential Chromatin Accessibility: Hypoxia vs. Normoxia",
     color = "Condition Enrichment"
   ) +
-  theme_classic() +
-  theme(plot.title = element_text(hjust = 0.5)) +
   geom_text_repel(max.overlaps = Inf, show.legend = FALSE)
 ```
 
@@ -555,7 +567,7 @@ res$motif <- row.names(res)
 The volcano plot displays the differential motif accessibility between hypoxia and normoxia conditions, with annotations highlighting the top 10 most significantly enriched and repressed motifs.
 Additionally, HIF transcription factor family motifs are annotated, as these master regulators of the hypoxic response are expected to be enriched and more accessible in hypoxic conditions.
 
-```{r volcano-plot-DA, fig.cap="Volcano plot showing differential motif accessibility between hypoxia and normoxia conditions. Annotated points show the top 10 most significantly enriched and depleted motifs, as well as motifs belonging to the HIF transcription factor family.", message=FALSE, warning=FALSE}
+```{r volcano-plot-DA, fig.width=8, fig.height=7, fig.cap="Volcano plot showing differential motif accessibility between hypoxia and normoxia conditions. Annotated points show the top 10 most significantly enriched and depleted motifs, as well as motifs belonging to the HIF transcription factor family.", message=FALSE, warning=FALSE}
 
 # color classification column
 res$diffexpressed <- "Not significant"
